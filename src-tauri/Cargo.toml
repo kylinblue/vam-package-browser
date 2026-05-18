@@ -1,0 +1,55 @@
+[package]
+name = "vam-package-browser"
+version = "0.1.0"
+description = "Local visual browser/indexer for VaM .var packages"
+edition = "2021"
+rust-version = "1.75"
+# Multiple binaries (main GUI + export_sample + tag_library) — `cargo run`
+# without --bin would be ambiguous. Pin the default to the Tauri GUI so
+# `tauri dev` / `tauri build` resolve correctly.
+default-run = "vam-package-browser"
+
+[lib]
+name = "vam_package_browser_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+
+# Scanner / indexer
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+walkdir = "2"
+rayon = "1.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "5"
+parking_lot = "0.12"
+once_cell = "1"
+
+# Thumbnails: decode JPG/PNG, resize, lossy WebP encode
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+webp = "0.3"
+
+# Hub scrape: HTTP client + HTML parser + XML parser (sitemap)
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip", "cookies"] }
+scraper = "0.20"
+url = "2"
+cookie_store = "0.21"
+quick-xml = "0.36"
+
+# Local embedding pipeline (pure-Rust ONNX via ort). Downloads ONNX model
+# files on first use to a HF-style cache dir; no per-inference network.
+fastembed = "4"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

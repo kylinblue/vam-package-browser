@@ -1,0 +1,332 @@
+{
+  "utility_plugins": [
+    {
+      "tag": "clothing-sim-texture-paint",
+      "description": "Tools that paint or edit simulation (SIM) textures directly onto clothing meshes inside VaM to fix clipping, control drape, and improve fit on non-base or morphed bodies.",
+      "examples": ["SIMTexturePainter"]
+    },
+    {
+      "tag": "clothing-mesh-editor",
+      "description": "Plugins for visualizing clothing/skin meshes, performing rewraps, editing base mesh sim cloth data, and assisting clothing creation/import workflows.",
+      "examples": ["Clothing Editor"]
+    },
+    {
+      "tag": "micro-physics-fixer",
+      "description": "Physics correction and optimization tools that detect unstable dynamics on Person atoms, apply fixes, auto-stabilize, and improve realism/stability for clothing and bodies.",
+      "examples": ["MicroPhysics Fixer"]
+    },
+    {
+      "tag": "ui-enhancement-toolkit",
+      "description": "Plugins that extend VaM's interface with quick-access buttons, performance monitors, active editors (e.g. clothing), workflow tools, and session enhancements.",
+      "examples": ["UI Assist by JayJayWon (free and patron versions)"]
+    },
+    {
+      "tag": "timeline-animation-editor",
+      "description": "Core animation creation, editing, and playback plugin used as a utility for building and controlling complex motions across scenes.",
+      "examples": ["Timeline by AcidBubbles"]
+    },
+    {
+      "tag": "high-res-screenshot",
+      "description": "Utilities for capturing higher-resolution screenshots, supersampled renders, or enhanced stills beyond default VaM output.",
+      "examples": ["SuperShot by MacGruber", "MacGruber Essentials bundle"]
+    },
+    {
+      "tag": "post-processing-effects",
+      "description": "Real-time post-processing tools adding bloom, depth of field, anti-aliasing, and other visual enhancements directly in VaM.",
+      "examples": ["PostMagic by MacGruber"]
+    },
+    {
+      "tag": "pov-improvement",
+      "description": "Camera and immersion enhancements specifically for point-of-view (POV) or custom first-person perspectives.",
+      "examples": ["ImprovedPOV by AcidBubbles"]
+    },
+    {
+      "tag": "clothing-texture-manager",
+      "description": "Tools for quickly changing, applying outfits, or managing textures on existing clothing items without external software.",
+      "examples": ["Wardrobe by VamDazzler"]
+    },
+    {
+      "tag": "package-dependency-manager",
+      "description": "Utilities that scan loaded scenes for missing .var dependencies and assist with locating, downloading, or managing required packages.",
+      "examples": ["VAM Dependency Bridge"]
+    },
+    {
+      "tag": "clipping-reducer",
+      "description": "Specialized fixes targeting common clipping problems such as nipples through clothing or body intersections.",
+      "examples": ["VamTaco Nipple Clipping Reducer"]
+    },
+    {
+      "tag": "body-smoothing",
+      "description": "Mesh smoothing tools that reduce visible polygon edges and improve body appearance under close-up or specific lighting.",
+      "examples": ["HuntingSuccubus Body Smoother"]
+    },
+    {
+      "tag": "morph-correction",
+      "description": "Targeted fixes for common morph issues on eyes, jaw, irises, or other facial/body morphs in custom looks.",
+      "examples": ["Irises Fixer", "Eye and Jaw morph fixers"]
+    },
+    {
+      "tag": "clothing-favorites",
+      "description": "Systems that add favorite tagging, quick filtering, and library management for clothing and hair items.",
+      "examples": ["Clothing and Hair Favorites plugin"]
+    },
+    {
+      "tag": "static-clothing-converter",
+      "description": "Tools that convert dynamic/simulated clothing into static meshes parented to body nodes for performance or specific use cases.",
+      "examples": ["Static Clothing plugin"]
+    },
+    {
+      "tag": "addon-updater",
+      "description": "Command-line or automated utilities that keep installed addons, plugins, and packages updated to latest versions.",
+      "examples": ["VAMUpdater"]
+    },
+    {
+      "tag": "physics-recorder",
+      "description": "Simple recording utilities for capturing physics simulations, motions, or dynamic interactions.",
+      "examples": ["Simple Recorder"]
+    },
+    {
+      "tag": "session-plugin-manager",
+      "description": "Tools and presets for managing, auto-loading, and organizing session plugins across multiple scenes or VaM sessions.",
+      "examples": ["UI Assist session features", "various community session plugin presets"]
+    },
+    {
+      "tag": "gaze-eye-tracking",
+      "description": "Eye-tracking and gaze direction plugins for realistic eye movement, focus, and interaction responses.",
+      "examples": ["Glance by AcidBubbles"]
+    },
+    {
+      "tag": "first-person-embodiment",
+      "description": "First-person VR embodiment and comfort plugins that improve presence, body ownership, and reduce motion discomfort in VR.",
+      "examples": ["Embody by AcidBubbles"]
+    },
+    {
+      "tag": "pose-ik-helper",
+      "description": "Plugins for static posing, pose loading/saving, IK targeting, solvers, and pose management, distinct from full Timeline animation tools.",
+      "examples": ["Posesaver"]
+    },
+    {
+      "tag": "audio-lipsync",
+      "description": "Audio playback utilities with driven lipsync, mouth animation, and audio file management for character performance.",
+      "examples": ["EasyMoan"]
+    },
+    {
+      "tag": "scene-logic-triggers",
+      "description": "Plugins for state machines, conditional behaviors, logic bricks, and advanced trigger systems beyond core VaM triggers.",
+      "examples": ["<validated in calibration>"]
+    },
+    {
+      "tag": "body-skin-decal-painter",
+      "description": "Tools for painting decals, tattoos, or custom textures directly onto body/skin meshes.",
+      "examples": ["<validated in calibration>"]
+    },
+    {
+      "tag": "blendshape-animator",
+      "description": "Plugins for controlling and animating blendshapes on CustomUnityAsset objects within VaM scenes.",
+      "examples": ["BlendShapes by AcidBubbles"]
+    },
+    {
+      "tag": "asset-property-editor",
+      "description": "General-purpose editors for CustomUnityAsset and light properties: scale, layers, shadows, material colors, alpha, emission, render settings, culling masks. Distinct from `post-processing-effects` which operates at the camera level.",
+      "examples": ["<validated in calibration>"]
+    },
+    {
+      "tag": "skin-transparency-mask",
+      "description": "Plugins for applying selective alpha masks to Person body parts (face, torso, limbs, genitals) to achieve transparency or skin-hiding effects.",
+      "examples": ["<validated in calibration>"]
+    },
+    {
+      "tag": "genital-physics-control",
+      "description": "Advanced controllers and helpers for genital physics (male, female, futa) including alignment, thrusting simulation, anus and labia morph automation, and related animation aids.",
+      "examples": ["MaF Penis Controller", "Physis Sex Helper"]
+    },
+    {
+      "tag": "oral-sex-animation",
+      "description": "Specialized plugins for blowjob, deepthroat, or other oral-act animation, often with integrated audio and moan support.",
+      "examples": ["<validated in calibration>"]
+    },
+    {
+      "tag": "object-tracking",
+      "description": "Plugins that rotate or move objects to continuously face, follow, or align with target objects. Distinct from `pose-ik-helper` which targets character IK; this is general object aiming/parenting.",
+      "examples": ["<validated in calibration>"]
+    },
+    {
+      "tag": "vr-rendering",
+      "description": "Plugins for rendering VR-format output (VR180, VR360, stereo 3D) and motion-capture export. Distinct from `high-res-screenshot` which produces flat stills.",
+      "examples": ["<validated in calibration>"]
+    }
+  ],
+  "location_scenes": [
+    {
+      "tag": "indoor-bedroom",
+      "description": "Bedroom and apartment residential sleeping or living spaces primarily intended as reusable backdrops.",
+      "examples": ["Apartment Bedroom", "various modular bedroom and apartment environment packs"]
+    },
+    {
+      "tag": "modular-room",
+      "description": "Modular room systems with customizable walls, doors, windows, multiple sizes, and texture variants for building custom reusable backdrops.",
+      "examples": ["My Cube Room", "3m/4m/6m modular room packs with doorway and window variants"]
+    },
+    {
+      "tag": "indoor-bathroom",
+      "description": "Bathroom and public restroom environments designed for reuse as scene backdrops.",
+      "examples": ["Public Restroom Environment"]
+    },
+    {
+      "tag": "outdoor-forest-nature",
+      "description": "Forest, woodland, oasis, and other natural environments (water features treated as a common property rather than separate category) for backdrop reuse.",
+      "examples": ["Forest Oasis Environment", "Forest Waterfall Bathing environment"]
+    },
+    {
+      "tag": "adult-entertainment-venue",
+      "description": "Casino, nightclub, and other adult entertainment venue environments with props for reusable backdrops.",
+      "examples": ["VaM Casino 69 Environment and Prop Assets"]
+    },
+    {
+      "tag": "outdoor-beach",
+      "description": "Beach, coastal, or seaside paradise environments intended for reuse as backdrops.",
+      "examples": ["Costa del Sol beach environment packs"]
+    },
+    {
+      "tag": "sci-fi-space",
+      "description": "Moon, orbital, or futuristic sci-fi environments primarily for backdrop reuse.",
+      "examples": ["The Moon"]
+    },
+    {
+      "tag": "medical-lab",
+      "description": "Medical observation, clinical, or laboratory room environments for reusable backdrops.",
+      "examples": ["Medical Observation Room"]
+    },
+    {
+      "tag": "fantasy-throne",
+      "description": "Fantasy throne rooms, castles, or regal interior environments for backdrop reuse.",
+      "examples": ["Throne room environment examples and packs"]
+    },
+    {
+      "tag": "commercial-diner",
+      "description": "Diner, cafe, or casual commercial interior environments for backdrop reuse.",
+      "examples": ["Another Diner environment"]
+    },
+    {
+      "tag": "anime-themed-room",
+      "description": "Anime or stylized character-themed room environments for backdrop reuse.",
+      "examples": ["Anime Girl Room"]
+    },
+    {
+      "tag": "outdoor-ruins",
+      "description": "Ancient ruins, decayed structures, or outdoor historical environments for backdrop reuse.",
+      "examples": ["Outdoor Ruins"]
+    },
+    {
+      "tag": "adult-store",
+      "description": "Specialized adult commercial or store-style environments for backdrop reuse.",
+      "examples": ["Sex Please Store (modified)"]
+    },
+    {
+      "tag": "indoor-office",
+      "description": "Office, executive, or professional workspace environments for backdrop reuse.",
+      "examples": ["Boss Office environment packs", "various modern office sets"]
+    },
+    {
+      "tag": "vehicle-interior",
+      "description": "Car, plane, train, or other vehicle interior environments for reusable backdrops.",
+      "examples": ["Ark1F1.Luxury_Ship"]
+    },
+    {
+      "tag": "residential-house",
+      "description": "Full residential building or multi-room house environments intended as reusable backdrops, distinct from `indoor-bedroom` or `indoor-bathroom`.",
+      "examples": ["<validated in calibration>"]
+    },
+    {
+      "tag": "roleplay-themed-room",
+      "description": "Specialized room environments oriented around a narrative roleplay scenario where the room's purpose drives the scene type (interrogation room, courtroom, exam room, classroom, etc.). Use as a fallback for narrative-distinct rooms not covered by a more specific tag like `medical-lab` or `school-classroom`.",
+      "examples": ["<validated in calibration>"]
+    }
+  ],
+  "speculative": [
+    {
+      "tag": "hair-specific-tools",
+      "category": "utility_plugins",
+      "description": "Hair physics, styling, editor, or fix tools separate from general clothing utilities.",
+      "reason_speculative": "Frequently discussed in VaM hair import and customization threads, but no specific 2+ named real packages with exact titles confirmed without invention."
+    },
+    {
+      "tag": "person-spawning-composition",
+      "category": "utility_plugins",
+      "description": "Utilities for easy Person atom spawning, multi-actor scene composition, and group management.",
+      "reason_speculative": "Widely needed for multi-character scenes and discussed in creator communities, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "expression-facial-triggers",
+      "category": "utility_plugins",
+      "description": "Plugins for advanced facial expressions, emotion triggers, and real-time facial animation control.",
+      "reason_speculative": "Common in performance and animation workflows alongside Timeline, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "photo-studio-cyclorama",
+      "category": "location_scenes",
+      "description": "Photo studio, cyclorama, or professional backdrop environments with seamless or green-screen style walls for reusable use.",
+      "reason_speculative": "Extremely common in VaM for photography, renders, and clean backdrops (many generic studio packs exist), but no specific 2+ named real packages with exact titles confirmed in data."
+    },
+    {
+      "tag": "gym-fitness",
+      "category": "location_scenes",
+      "description": "Gym, fitness center, or workout room environments for reusable backdrops.",
+      "reason_speculative": "Popular category in VaM scene libraries and creator requests for athletic or training settings, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "kitchen",
+      "category": "location_scenes",
+      "description": "Kitchen or culinary workspace environments for reusable backdrops.",
+      "reason_speculative": "Common residential environment type requested and created by users, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "living-room",
+      "category": "location_scenes",
+      "description": "Living room or lounge residential environments for reusable backdrops.",
+      "reason_speculative": "Very common residential backdrop category alongside bedrooms, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "school-classroom",
+      "category": "location_scenes",
+      "description": "School classroom, lecture hall, or educational interior environments for reusable backdrops.",
+      "reason_speculative": "Frequent in roleplay and story scene requests, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "hotel-room",
+      "category": "location_scenes",
+      "description": "Hotel room or temporary lodging environments for reusable backdrops.",
+      "reason_speculative": "Common in travel or temporary-stay scene themes, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "industrial-warehouse",
+      "category": "location_scenes",
+      "description": "Industrial, factory, or warehouse environments for reusable backdrops.",
+      "reason_speculative": "Popular for gritty or large-scale scene settings, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "dungeon-basement",
+      "category": "location_scenes",
+      "description": "Dungeon, basement, or dark fantasy interior environments for reusable backdrops.",
+      "reason_speculative": "Very common in fantasy and BDSM-themed content, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "pool-spa",
+      "category": "location_scenes",
+      "description": "Pool, spa, or aquatic relaxation environments for reusable backdrops.",
+      "reason_speculative": "Common luxury or recreational setting, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "outdoor-urban-street",
+      "category": "location_scenes",
+      "description": "Urban street, alley, or city exterior environments for reusable backdrops.",
+      "reason_speculative": "Useful for outdoor city or public scenes, but no specific 2+ named real packages confirmed with verifiable titles."
+    },
+    {
+      "tag": "locker-room",
+      "category": "location_scenes",
+      "description": "Locker room or changing room environments (often gym-adjacent) for reusable backdrops.",
+      "reason_speculative": "Common companion to gym or sports themes, but no specific 2+ named real packages confirmed with verifiable titles."
+    }
+  ]
+}

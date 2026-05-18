@@ -1,0 +1,523 @@
+{
+  "version": "v4",
+  "summary": "Multi-dimensional namespaced taxonomy for VaM packages. Every family receives exactly one `kind:*` tag identifying its primary identity, plus 0-N tags from other namespaces describing attributes. Replaces v3's flat tag list + out-of-scope binary; everything gets tagged.",
+
+  "namespaces": {
+
+    "kind": {
+      "applies_to": "any",
+      "cardinality": "exactly-1",
+      "description": "Primary identity of the package. Required on every record. Decided from description + instructions + content_summary, NOT from the input package_type heuristic which is unreliable.",
+      "values": [
+        { "value": "utility-plugin",   "description": "Tools that modify VaM behavior, add capabilities, or fix issues. Plugins, scripts, session helpers." },
+        { "value": "location-scene",   "description": "Reusable environments/backdrops. CUA-dominant, no significant animation, no Person customization driving the package." },
+        { "value": "act-scene",        "description": "Animation-heavy narrative or sex scenes. One-off content, often with Timeline/triggers driving choreography." },
+        { "value": "character-look",   "description": "Character appearance packs (any style, any gender). Includes Wunderwise-pattern Looks shipped with a demo scene — kind is determined by primary purpose, not bundling." },
+        { "value": "clothing-item",    "description": "Clothing items or packs. Includes decals, geoshells, and accessories that present as clothing." },
+        { "value": "hair-item",        "description": "Hair items or packs. Includes scalp hair, body hair, beard, eyelashes." },
+        { "value": "morph-pack",       "description": "Morph collections. Face/body/genital/limb adjustments." },
+        { "value": "pose-preset",      "description": "Pose preset(s). Single or multi-character." },
+        { "value": "prop-asset",       "description": "Standalone furniture, vehicles, weapons, decorative objects. Generally usable in any scene." },
+        { "value": "support-asset",    "description": "Non-playable assets: LUTs, lighting rigs, water planes, skyboxes, particle effects, texture libraries. Used by other tools." },
+        { "value": "texture-pack",     "description": "Pure texture distributions: skin variants, eye textures, decal libraries, makeup, tattoos, normal maps." },
+        { "value": "audio-pack",       "description": "Raw audio file packs: music, sound effects, moans, voice clips, ambient." },
+        { "value": "subscene-pack",    "description": "Modular reusable scene chunks: lighting subscenes, prop bundles, character pose sets." },
+        { "value": "mixed-package",    "description": "Genuinely multi-purpose package spanning several kinds with no single dominant identity. Rare; explain in notes." }
+      ]
+    },
+
+    "content": {
+      "applies_to": ["act-scene"],
+      "cardinality": "exactly-1",
+      "description": "Content rating for act scenes. Required on kind:act-scene; not used elsewhere.",
+      "values": [
+        { "value": "safe",        "description": "No sexual or suggestive content." },
+        { "value": "suggestive",  "description": "Suggestive or partially nude but not explicit." },
+        { "value": "explicit",    "description": "Sexual acts depicted." }
+      ]
+    },
+
+    "count": {
+      "applies_to": ["pose-preset", "act-scene"],
+      "cardinality": "0-1",
+      "description": "Number of participants.",
+      "values": [
+        { "value": "single", "description": "One person." },
+        { "value": "duo",    "description": "Two people." },
+        { "value": "group",  "description": "Three or more." }
+      ]
+    },
+
+    "function": {
+      "applies_to": ["utility-plugin"],
+      "cardinality": "0-N typically 1",
+      "description": "What a utility plugin does. Multi-tag only for genuine bundles (e.g. MacGruber Essentials covers screenshot + post-processing + UI).",
+      "values": [
+        { "value": "timeline-animation-editor", "description": "Core animation creation/editing/playback. AcidBubbles' Timeline and variants." },
+        { "value": "pose-ik-helper",            "description": "Static posing, pose loading/saving, IK targeting, controller adjustment." },
+        { "value": "bone-control",              "description": "Direct bone manipulation (distinct from controller-level IK)." },
+        { "value": "puppeteer-controller",      "description": "Character animation/control framework distinct from Timeline (e.g. Puppeteer, idle posing systems)." },
+        { "value": "object-tracking",           "description": "Rotates or moves objects to follow/face/align with targets. General object aiming." },
+        { "value": "parameter-randomizer",      "description": "Randomizes morph/parameter values across atoms or expressions." },
+        { "value": "scene-logic-triggers",      "description": "State machines, conditional triggers, logic bricks, delay-and-fire, sequence choices." },
+
+        { "value": "gaze-eye-tracking",         "description": "Eye-tracking and gaze direction. Glance and similar." },
+        { "value": "first-person-embodiment",   "description": "VR comfort and first-person body ownership. Embody and similar." },
+        { "value": "pov-improvement",           "description": "Camera/POV enhancements." },
+
+        { "value": "post-processing-effects",   "description": "Camera-level visual effects: bloom, DOF, AA, vignette, motion blur, LUT." },
+        { "value": "high-res-screenshot",       "description": "Supersampled stills, enhanced renders. SuperShot family." },
+        { "value": "vr-rendering",              "description": "VR180/360 stereo image/video rendering and BVH export." },
+        { "value": "asset-property-editor",     "description": "Per-CUA / per-light property editing (scale, shadows, material color, alpha, emission, render settings)." },
+
+        { "value": "physics-genital",           "description": "Genital physics (male, female, futa): alignment, thrust, anus/labia automation, foreskin control. REPLACES v3 genital-physics-control." },
+        { "value": "physics-collider",          "description": "Collider editing, custom colliders, capsule additions. From collider-configuration suggestions." },
+        { "value": "physics-wind",              "description": "Wind forces on rigidbodies, cloth, and hair. Directional/turbulent/radial." },
+        { "value": "physics-leash",             "description": "Tether/parent-link constraints between atoms or controllers." },
+        { "value": "physics-stability",         "description": "General physics correction / optimization / jiggle stability. RENAMES v3 micro-physics-fixer." },
+        { "value": "physics-clipping-fix",      "description": "Targeted clipping fixes (nipple, body intersection, etc.). RENAMES v3 clipping-reducer." },
+        { "value": "physics-hardware",          "description": "Hardware integration: T-Code device sync, haptic controllers." },
+        { "value": "physics-recorder",          "description": "Recording physics simulations/motions." },
+
+        { "value": "audio-lipsync",             "description": "Mouth animation morphs driven by audio. NARROWED in v4 — file management/sound effects go to audio-management or audio-sfx." },
+        { "value": "audio-management",          "description": "Audio file importing/organizing/triggering, soundtrack synchronization." },
+        { "value": "audio-sfx",                 "description": "Triggered sound effects: moans, slaps, ambient hits. VAMMoan, EasyMoan, SlapStuff family." },
+        { "value": "audio-visualization",       "description": "Audio frequency analysis or beat-driven trigger output (without playback management)." },
+
+        { "value": "expression-facial-triggers","description": "Facial expression control, emotion triggers. GRADUATED from v3 speculative." },
+        { "value": "body-language",             "description": "Comprehensive character behavior systems (arousal, breathing, body language meta-frameworks). MacGruber Life and similar." },
+        { "value": "belly-bulge",               "description": "Insertion-driven belly bulge morphs and physics." },
+        { "value": "oral-sex-animation",        "description": "Blowjob/deepthroat animation with optional audio." },
+
+        { "value": "blendshape-animator",       "description": "CustomUnityAsset blendshape control and animation." },
+        { "value": "asset-property-editor",     "description": "see above" },
+        { "value": "alpha-mask",                "description": "Selective transparency on Person body parts (face/torso/limbs/genitals). RENAMES v3 skin-transparency-mask." },
+        { "value": "body-skin-decal-painter",   "description": "Painting decals/tattoos/textures onto body regions." },
+        { "value": "body-smoothing",            "description": "Mesh smoothing/tessellation for body appearance." },
+        { "value": "morph-correction",          "description": "Targeted morph fixes (eye/jaw/iris/anatomy)." },
+
+        { "value": "clothing-sim-texture-paint","description": "In-VaM SIM texture painting onto clothing meshes." },
+        { "value": "clothing-mesh-editor",      "description": "Clothing mesh visualization, rewraps, sim cloth editing." },
+        { "value": "clothing-texture-manager",  "description": "Wardrobe-style outfit/texture swapping at runtime." },
+        { "value": "emissive-clothing-effect",  "description": "Emissive shader effects on clothing items with color tween/alpha pulse." },
+        { "value": "clothing-favorites",        "description": "Favorite-tagging and quick filtering for clothing/hair libraries." },
+        { "value": "static-clothing-converter", "description": "Convert dynamic clothing to static parented meshes." },
+
+        { "value": "hair-specific-tools",       "description": "Hair styling/editor/preset tools. GRADUATED from v3 speculative." },
+
+        { "value": "package-dependency-manager","description": "Scan loaded scenes for missing .var deps and assist locating/downloading." },
+        { "value": "addon-updater",             "description": "Auto-update installed addons/plugins." },
+        { "value": "ui-enhancement-toolkit",    "description": "UI extension: canvas buttons, quick-access widgets, performance HUDs, workflow tools." },
+        { "value": "session-plugin-manager",    "description": "Session-level plugin/preset management and auto-loading." }
+      ]
+    },
+
+    "setting": {
+      "applies_to": ["location-scene", "act-scene"],
+      "cardinality": "0-N typically 1",
+      "description": "Where the scene is set. Indoor-X / outdoor-X / themed-X / vehicle-interior. Multi-value only when the package contains multiple distinct settings.",
+      "values": [
+        { "value": "indoor-bedroom",            "description": "Bedroom or sleeping space." },
+        { "value": "indoor-bathroom",           "description": "Bathroom, restroom, washroom." },
+        { "value": "indoor-kitchen",            "description": "Kitchen or culinary space." },
+        { "value": "indoor-living-room",        "description": "Living room or lounge." },
+        { "value": "indoor-house",              "description": "Full residential building or multi-room house." },
+        { "value": "indoor-apartment",          "description": "Apartment unit (often multi-room)." },
+        { "value": "indoor-loft",               "description": "Loft or open-plan studio." },
+        { "value": "indoor-hotel",              "description": "Hotel room or lobby." },
+        { "value": "indoor-office",             "description": "Office or workspace." },
+        { "value": "indoor-classroom",          "description": "School classroom or lecture hall. Includes detention rooms." },
+        { "value": "indoor-medical-lab",        "description": "Medical observation, exam, clinical, lab." },
+        { "value": "indoor-interrogation",      "description": "Interrogation room or holding room." },
+        { "value": "indoor-photo-studio",       "description": "Photography studio, cyclorama, seamless backdrop." },
+        { "value": "indoor-gym",                "description": "Gym, fitness center, workout space." },
+        { "value": "indoor-locker-room",        "description": "Locker / changing room." },
+        { "value": "indoor-pool",               "description": "Indoor pool, spa, aquatic relaxation space." },
+        { "value": "indoor-warehouse",          "description": "Industrial / warehouse / factory interior." },
+        { "value": "indoor-dungeon",            "description": "Dungeon, basement, dark fantasy interior." },
+        { "value": "indoor-throne-room",        "description": "Throne room, castle interior, royal hall." },
+        { "value": "indoor-tavern",             "description": "Tavern, inn, period drinking establishment." },
+        { "value": "indoor-bar",                "description": "Modern bar (not tavern)." },
+        { "value": "indoor-club",               "description": "Nightclub or dance club interior." },
+        { "value": "indoor-entertainment-venue","description": "Casino, strip club, adult entertainment venue. (Was adult-entertainment-venue in v3.)" },
+        { "value": "indoor-diner",              "description": "Diner, cafe, casual restaurant interior." },
+        { "value": "indoor-store",              "description": "Store, shop, retail interior. Includes adult stores." },
+        { "value": "indoor-cave",               "description": "Cave interior, natural underground." },
+        { "value": "indoor-modular-room",       "description": "Modular customizable room (walls/doors/windows kit, not a specific space)." },
+        { "value": "outdoor-forest-nature",     "description": "Forest, woodland, oasis, natural landscape." },
+        { "value": "outdoor-beach",             "description": "Beach, coast, seaside." },
+        { "value": "outdoor-ruins",             "description": "Ancient ruins, decayed historical structures." },
+        { "value": "outdoor-snow",              "description": "Snowy landscape, winter outdoor." },
+        { "value": "outdoor-alley",             "description": "Alley, narrow back street." },
+        { "value": "outdoor-urban-street",      "description": "City street, urban exterior." },
+        { "value": "vehicle-interior",          "description": "Car, plane, ship, train interior." },
+        { "value": "sci-fi-space",              "description": "Futuristic, sci-fi, space, moon, orbital, cyberpunk environments." },
+        { "value": "anime-themed-room",         "description": "Anime/stylized character-themed room." },
+        { "value": "roleplay-themed-room",      "description": "Narrative-distinct room not covered by a more specific tag (fallback for niche roleplay settings)." }
+      ]
+    },
+
+    "activity": {
+      "applies_to": ["pose-preset", "act-scene", "mixed-package"],
+      "cardinality": "0-N",
+      "description": "What's happening. Multi-tag when a pack covers several activities.",
+      "values": [
+        { "value": "standing",          "description": "Standing pose." },
+        { "value": "sitting",           "description": "Sitting pose (chair, floor, etc)." },
+        { "value": "lying",             "description": "Lying down pose." },
+        { "value": "action",            "description": "Dynamic/action pose." },
+        { "value": "photo-pose",        "description": "Photography/gravure pose." },
+        { "value": "sexual-position",   "description": "Sexual act pose preset." },
+        { "value": "sex-scene",         "description": "Animated sex scene (act-scene only)." },
+        { "value": "narrative",         "description": "Story-driven act scene." },
+        { "value": "dance",             "description": "Dance/performance." },
+        { "value": "showcase",          "description": "Showcase/demo scene (multi-look or scripted showcase)." },
+        { "value": "bdsm",              "description": "BDSM/bondage scenario." },
+        { "value": "oral",              "description": "Oral act (blowjob, deepthroat, cunnilingus)." }
+      ]
+    },
+
+    "style": {
+      "applies_to": ["character-look", "clothing-item", "hair-item", "act-scene"],
+      "cardinality": "0-1",
+      "description": "Art style. Almost always single.",
+      "values": [
+        { "value": "realistic",  "description": "Photorealistic." },
+        { "value": "anime",      "description": "Anime / manga style." },
+        { "value": "stylized",   "description": "Non-realistic, non-anime stylization." },
+        { "value": "fantasy",    "description": "Fantasy art style (overlaps with theme:fantasy; use when art style itself is fantastical)." }
+      ]
+    },
+
+    "theme": {
+      "applies_to": ["location-scene", "character-look", "clothing-item", "hair-item", "act-scene", "prop-asset"],
+      "cardinality": "0-N typically 1",
+      "description": "Era, world, or persona theme. Independent of art style.",
+      "values": [
+        { "value": "modern",         "description": "Contemporary / present-day." },
+        { "value": "fantasy",        "description": "Fantasy genre setting." },
+        { "value": "sci-fi",         "description": "Science fiction / cyberpunk / futuristic." },
+        { "value": "period",         "description": "Historical period (Victorian, medieval, ancient, etc.)." },
+        { "value": "monster",        "description": "Monster/creature/non-human theme." },
+        { "value": "winter",         "description": "Winter / cold-weather theme." },
+        { "value": "nightlife",      "description": "Club, bar, party nightlife theme." },
+        { "value": "religious",      "description": "Religious or ceremonial theme." },
+        { "value": "military",       "description": "Military / tactical theme." },
+        { "value": "dark",           "description": "Dark / gritty / horror theme." },
+        { "value": "holiday",        "description": "Holiday-specific (Christmas, Halloween, etc.)." },
+        { "value": "celebrity-like", "description": "Inspired by a specific real-world celebrity or character." }
+      ]
+    },
+
+    "aesthetic": {
+      "applies_to": ["character-look", "clothing-item"],
+      "cardinality": "0-N typically 1",
+      "description": "Descriptive tone/adjective. Optional flavoring beyond style and theme.",
+      "values": [
+        { "value": "casual",   "description": "Everyday/casual." },
+        { "value": "formal",   "description": "Formal/dressy." },
+        { "value": "sporty",   "description": "Athletic/sportswear." },
+        { "value": "fetish",   "description": "Fetishwear, kink." },
+        { "value": "goth",     "description": "Goth / dark / alternative." },
+        { "value": "kinky",    "description": "Kinky / suggestive." },
+        { "value": "sexy",     "description": "Generally sexy/revealing." },
+        { "value": "cute",     "description": "Cute / kawaii." },
+        { "value": "edgy",     "description": "Edgy / aggressive aesthetic." },
+        { "value": "urban",    "description": "Streetwear / urban style." },
+        { "value": "romantic", "description": "Romantic / soft." },
+        { "value": "festive",  "description": "Holiday / festive." }
+      ]
+    },
+
+    "body": {
+      "applies_to": ["character-look"],
+      "cardinality": "0-1",
+      "description": "Body type of the depicted character.",
+      "values": [
+        { "value": "petite",              "description": "Small / slim build." },
+        { "value": "athletic",            "description": "Athletic / toned." },
+        { "value": "curvy",               "description": "Curvy / hourglass." },
+        { "value": "plus-size",           "description": "Plus-size / heavier." },
+        { "value": "masculine",           "description": "Masculine build (default male)." },
+        { "value": "masculine-muscular", "description": "Heavily muscular masculine build." }
+      ]
+    },
+
+    "hair-color": {
+      "applies_to": ["character-look", "hair-item"],
+      "cardinality": "0-N",
+      "description": "Hair color(s). Multi-value when the pack ships multiple color variants.",
+      "values": [
+        { "value": "blonde",    "description": "Blonde." },
+        { "value": "brunette",  "description": "Brunette / light brown." },
+        { "value": "brown",     "description": "Mid-tone brown." },
+        { "value": "dark-brown","description": "Dark brown." },
+        { "value": "black",     "description": "Black." },
+        { "value": "redhead",   "description": "Natural red." },
+        { "value": "red",       "description": "Vivid red (dyed)." },
+        { "value": "gray",      "description": "Gray / silver." },
+        { "value": "white",     "description": "White / platinum." },
+        { "value": "fantasy",   "description": "Fantasy color (blue, pink, green, etc.)." },
+        { "value": "mixed",     "description": "Multiple colors blended." }
+      ]
+    },
+
+    "hair-length": {
+      "applies_to": ["character-look", "hair-item"],
+      "cardinality": "0-N",
+      "description": "Hair length(s). Multi only for packs covering multiple lengths.",
+      "values": [
+        { "value": "short",     "description": "Short (above shoulders)." },
+        { "value": "medium",    "description": "Shoulder length." },
+        { "value": "long",      "description": "Long (past shoulders)." },
+        { "value": "very-long", "description": "Very long (mid-back or longer)." }
+      ]
+    },
+
+    "hair-style": {
+      "applies_to": ["character-look", "hair-item"],
+      "cardinality": "0-N",
+      "description": "Hair styling (actual style, not body region — see hair-region for pubic/beard/etc).",
+      "values": [
+        { "value": "straight",     "description": "Straight hair." },
+        { "value": "wavy",         "description": "Wavy hair." },
+        { "value": "curly",        "description": "Curly hair." },
+        { "value": "ponytail",     "description": "Ponytail (any single tail variant)." },
+        { "value": "sidetail",     "description": "Side ponytail." },
+        { "value": "twintails",    "description": "Twin tails / pigtails." },
+        { "value": "braided",      "description": "Braided." },
+        { "value": "updo",         "description": "Updo / bun / chignon." },
+        { "value": "bob",          "description": "Bob cut." },
+        { "value": "bangs",        "description": "Bangs / fringe." },
+        { "value": "layered",      "description": "Layered cut." },
+        { "value": "messy",        "description": "Messy / unkempt." },
+        { "value": "natural",      "description": "Natural / unstyled." }
+      ]
+    },
+
+    "hair-region": {
+      "applies_to": ["hair-item"],
+      "cardinality": "0-N",
+      "description": "Which body zone the hair grows on. NEW in v4 — separates body hair from scalp hair styling. Default scalp.",
+      "values": [
+        { "value": "scalp",    "description": "Head hair (default for most hair packs)." },
+        { "value": "pubic",    "description": "Pubic hair." },
+        { "value": "body",     "description": "General body hair (chest, back, etc.)." },
+        { "value": "beard",    "description": "Facial hair (beard, mustache, sideburns)." },
+        { "value": "eyelash",  "description": "Eyelashes." },
+        { "value": "eyebrow",  "description": "Eyebrows." }
+      ]
+    },
+
+    "age-appearance": {
+      "applies_to": ["character-look"],
+      "cardinality": "0-1",
+      "description": "Approximate adult age range of the depicted character. Adults only (VaM is 18+).",
+      "values": [
+        { "value": "young-adult", "description": "Young adult appearance (early 20s)." },
+        { "value": "mature",      "description": "Mature adult appearance (30s+)." }
+      ]
+    },
+
+    "type": {
+      "applies_to": ["clothing-item"],
+      "cardinality": "0-N typically 1",
+      "description": "Top-level clothing category by body region or format. Multi-value for genuine bundles (e.g. lingerie + footwear).",
+      "values": [
+        { "value": "top",         "description": "Upper-body garment (shirt, sweater, jacket, top)." },
+        { "value": "bottom",      "description": "Lower-body garment (pants, shorts, skirt, leggings)." },
+        { "value": "full-outfit", "description": "Complete outfit covering top + bottom." },
+        { "value": "dress",       "description": "Dress / one-piece garment." },
+        { "value": "lingerie",    "description": "Lingerie set." },
+        { "value": "underwear",   "description": "Underwear (bra, panty, boxer, briefs)." },
+        { "value": "swimwear",    "description": "Swimsuit, bikini, trunks." },
+        { "value": "footwear",    "description": "Shoes, boots, heels, sandals." },
+        { "value": "hosiery",     "description": "Socks, stockings, tights, leggings." },
+        { "value": "headwear",    "description": "Hat, helmet, headband, tiara." },
+        { "value": "eyewear",     "description": "Glasses, goggles, masks (eye-area only)." },
+        { "value": "accessory",   "description": "Jewelry, piercings, collars, chokers, bracelets." },
+        { "value": "restraint",   "description": "BDSM restraints, cuffs, harnesses." },
+        { "value": "decal",       "description": "Decal-style clothing item (overlay textures, eye reflections, nail polish, body decals)." },
+        { "value": "geoshell",    "description": "Geoshell-format clothing (textures on a body-mesh shell)." }
+      ]
+    },
+
+    "subtype": {
+      "applies_to": ["clothing-item"],
+      "cardinality": "0-N",
+      "description": "Specific garment within the top-level type. Free-form kebab-case; common values listed.",
+      "values": [
+        { "value": "shirt",          "description": "Shirt / t-shirt / blouse." },
+        { "value": "sweater",        "description": "Sweater / pullover / cardigan." },
+        { "value": "jacket",         "description": "Jacket / coat." },
+        { "value": "shorts",         "description": "Shorts." },
+        { "value": "pants",          "description": "Trousers / jeans." },
+        { "value": "skirt",          "description": "Skirt." },
+        { "value": "leggings",       "description": "Leggings / yoga pants." },
+        { "value": "catsuit",        "description": "Catsuit / bodystocking." },
+        { "value": "bodysuit",       "description": "Bodysuit (general)." },
+        { "value": "bra",            "description": "Bra." },
+        { "value": "panty",          "description": "Panty / underwear bottom." },
+        { "value": "boxers",         "description": "Boxers / briefs." },
+        { "value": "boots",          "description": "Boots." },
+        { "value": "heels",          "description": "Heels." },
+        { "value": "shoes",          "description": "General shoes." },
+        { "value": "socks",          "description": "Socks." },
+        { "value": "stockings",      "description": "Stockings." },
+        { "value": "veil",           "description": "Veil." },
+        { "value": "choker",         "description": "Choker." },
+        { "value": "piercing",       "description": "Piercing (nose, ear, navel, nipple, etc)." },
+        { "value": "cuffs",          "description": "Cuffs / restraints." },
+        { "value": "mask",           "description": "Mask (face covering)." },
+        { "value": "tiara",          "description": "Tiara / crown." },
+        { "value": "bracelet",       "description": "Bracelet." },
+        { "value": "braces",         "description": "Dental braces." },
+        { "value": "eye-reflection", "description": "Eye reflection / iris reflex decal." },
+        { "value": "makeup-decal",   "description": "Makeup-applied-as-decal (eyeshadow, eyeliner)." },
+        { "value": "nail-polish",    "description": "Nail polish decal." },
+        { "value": "fluid-decal",    "description": "Fluid/cum decal (clothing-format)." },
+        { "value": "tattoo-decal",   "description": "Tattoo decal (clothing-format)." }
+      ]
+    },
+
+    "material": {
+      "applies_to": ["clothing-item"],
+      "cardinality": "0-N typically 1",
+      "description": "Material aesthetic. Optional, only when distinctly identifiable.",
+      "values": [
+        { "value": "fabric",  "description": "Generic fabric/cloth." },
+        { "value": "leather", "description": "Leather." },
+        { "value": "latex",   "description": "Latex / shiny rubber." },
+        { "value": "velvet",  "description": "Velvet." },
+        { "value": "lace",    "description": "Lace." },
+        { "value": "metal",   "description": "Metal / armor." },
+        { "value": "fur",     "description": "Fur." },
+        { "value": "plastic", "description": "Plastic." },
+        { "value": "fluid",   "description": "Fluid/cum decal material." }
+      ]
+    },
+
+    "region": {
+      "applies_to": ["morph-pack"],
+      "cardinality": "0-N typically 1",
+      "description": "Body region the morph targets. Multi for cross-region packs.",
+      "values": [
+        { "value": "face",    "description": "Face / head morphs." },
+        { "value": "body",    "description": "General body morphs." },
+        { "value": "hand",    "description": "Hand morphs." },
+        { "value": "foot",    "description": "Foot morphs." },
+        { "value": "arm",     "description": "Arm-specific morphs." },
+        { "value": "leg",     "description": "Leg-specific morphs." },
+        { "value": "genital", "description": "Genital morphs." },
+        { "value": "breast",  "description": "Breast morphs." },
+        { "value": "ear",     "description": "Ear morphs." },
+        { "value": "eye",     "description": "Eye morphs (excluding jaw)." },
+        { "value": "jaw",     "description": "Jaw / mouth morphs." }
+      ]
+    },
+
+    "purpose": {
+      "applies_to": ["morph-pack"],
+      "cardinality": "0-N typically 1",
+      "description": "Why the morph exists. NARROWED in v4 to morphs only — asset class for non-morph kinds is asset-type.",
+      "values": [
+        { "value": "fix",         "description": "Corrects a deformation issue (e.g. anus position, foot in shoes)." },
+        { "value": "variation",   "description": "Alternative aesthetic / pre-defined shape variations." },
+        { "value": "enhancement", "description": "Adds detail or augments default anatomy." },
+        { "value": "detail",      "description": "Fine details (armpit folds, surface details)." }
+      ]
+    },
+
+    "asset-type": {
+      "applies_to": ["prop-asset", "support-asset", "texture-pack", "audio-pack", "subscene-pack"],
+      "cardinality": "0-N typically 1",
+      "description": "Specific kind of asset. RENAMED from v3 purpose: for non-morph kinds.",
+      "values": [
+        { "value": "furniture",        "description": "Furniture (bed, couch, chair, table)." },
+        { "value": "vehicle",          "description": "Vehicle prop (car, plane, ship, etc)." },
+        { "value": "weapon",           "description": "Weapon prop." },
+        { "value": "decoration",       "description": "Decorative object (candles, plants, jewelry props)." },
+        { "value": "electronic",       "description": "Electronic device prop (camera, computer, phone)." },
+        { "value": "food-drink",       "description": "Food/drink prop." },
+        { "value": "misc-prop",        "description": "Miscellaneous prop." },
+        { "value": "lut",              "description": "Color-grading LUT pack." },
+        { "value": "lighting-rig",     "description": "Lighting rig subscene or asset." },
+        { "value": "water-plane",      "description": "Water/reflection plane." },
+        { "value": "skybox",           "description": "Skybox / HDRI environment." },
+        { "value": "particle-effect",  "description": "Particle effect asset (flame, smoke, etc)." },
+        { "value": "texture-library",  "description": "Material texture library subscene." },
+        { "value": "scene-modules",    "description": "Modular scene chunks (rooms, vignettes)." },
+        { "value": "decal",            "description": "Decal texture pack (tattoo, makeup, freckles, moles)." },
+        { "value": "skin",             "description": "Skin texture variants." },
+        { "value": "eye-texture",      "description": "Eye/iris/sclera textures." },
+        { "value": "makeup",           "description": "Makeup texture pack." },
+        { "value": "tattoo",           "description": "Tattoo decal pack." },
+        { "value": "nail-polish",      "description": "Nail polish texture pack." },
+        { "value": "normal-map",       "description": "Normal/displacement map pack." },
+        { "value": "shader",           "description": "Custom shader asset." },
+        { "value": "music",            "description": "Music track pack." },
+        { "value": "sound-effect",     "description": "Sound effect pack." },
+        { "value": "voice",            "description": "Voice / dialogue clips." },
+        { "value": "ambient",          "description": "Ambient soundscape pack." }
+      ]
+    }
+
+  },
+
+  "migration_from_v3": {
+    "note": "v4 replaces v3's flat utility/location/speculative arrays. All v3 tags are now namespaced or renamed. Speculative graduates land in their target namespace.",
+    "renames": {
+      "genital-physics-control":   "function:physics-genital",
+      "micro-physics-fixer":       "function:physics-stability",
+      "clipping-reducer":          "function:physics-clipping-fix",
+      "skin-transparency-mask":    "function:alpha-mask",
+      "medical-lab":               "setting:indoor-medical-lab",
+      "fantasy-throne":            "setting:indoor-throne-room",
+      "commercial-diner":          "setting:indoor-diner",
+      "adult-store":               "setting:indoor-store",
+      "residential-house":         "setting:indoor-house",
+      "adult-entertainment-venue": "setting:indoor-entertainment-venue",
+      "outdoor-urban-street":      "setting:outdoor-urban-street",
+      "photo-studio-cyclorama":    "setting:indoor-photo-studio",
+      "dungeon-basement":          "setting:indoor-dungeon",
+      "industrial-warehouse":      "setting:indoor-warehouse",
+      "pool-spa":                  "setting:indoor-pool",
+      "hotel-room":                "setting:indoor-hotel",
+      "gym-fitness":               "setting:indoor-gym",
+      "locker-room":               "setting:indoor-locker-room",
+      "living-room":               "setting:indoor-living-room",
+      "school-classroom":          "setting:indoor-classroom"
+    },
+    "graduations": [
+      "function:expression-facial-triggers (was speculative)",
+      "function:hair-specific-tools (was speculative)",
+      "setting:outdoor-urban-street (was speculative)",
+      "setting:indoor-photo-studio (was speculative)",
+      "setting:indoor-dungeon (was speculative)",
+      "setting:indoor-warehouse (was speculative)",
+      "setting:indoor-pool (was speculative)",
+      "setting:indoor-hotel (was speculative)",
+      "setting:indoor-gym (was speculative)",
+      "setting:indoor-locker-room (was speculative)",
+      "setting:indoor-living-room (was speculative)"
+    ],
+    "new_in_v4": [
+      "All kind:* values (new namespace concept)",
+      "All content:*, count:*, body:*, hair-color:*, hair-length:*, hair-style:*, hair-region:*, age-appearance:*, type:*, subtype:*, material:*, theme:*, aesthetic:*, asset-type:* (new namespaces)",
+      "function:physics-collider (from collider-configuration suggestions)",
+      "function:physics-wind (from wind-physics-control)",
+      "function:physics-leash (from physics-leash)",
+      "function:physics-hardware (from t-code-device-synchronizer)",
+      "function:audio-management (from audio-management)",
+      "function:audio-sfx (separation of audio-lipsync over-application)",
+      "function:audio-visualization (from audio-visualization)",
+      "function:bone-control (from bone-control)",
+      "function:puppeteer-controller (from puppeteer-controller)",
+      "function:parameter-randomizer (from parameter-randomizer)",
+      "function:body-language (from MacGruber Life / Body Language family)",
+      "function:belly-bulge (from BellyBulger)",
+      "function:emissive-clothing-effect (from EmissiveClothingPlus)",
+      "setting:indoor-tavern, setting:indoor-cave, setting:indoor-apartment, setting:indoor-loft, setting:indoor-interrogation, setting:outdoor-snow, setting:outdoor-alley (new from pilot)"
+    ]
+  }
+}
