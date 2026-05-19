@@ -127,28 +127,31 @@ packages) plus a handful of narrow model gaps. Verified by
 [src-tauri/src/bin/classifier_gaps_census.rs](src-tauri/src/bin/classifier_gaps_census.rs)
 — run it any time to refresh these numbers.
 
-### 1. The 187 packages without `family_id`
+### 1. The 187 packages without `family_id` — *structural fix landed*
 
-The dominant gap. `scanner::scan` ends its transaction with
-`deps::resolve_all()` but does NOT call `family::recompute()` — family
-assignment is on-demand via `tag_library --recompute-families`. So any
-package scanned after the last manual recompute sits with
-`family_id = NULL`, which makes it invisible to both kind-vote (needs
-family_tags) and embed-knn (needs family_embeddings). graph-prop can
-still hit some of them via dep-graph edges, which is why most of the
-187 do have predictions — but 11 fall through entirely.
+The dominant gap. `scanner::scan` previously ended its transaction with
+`deps::resolve_all()` only — family assignment was on-demand via
+`tag_library --recompute-families`. Any package scanned after the last
+manual recompute sat with `family_id = NULL`, invisible to both
+kind-vote (needs family_tags) and embed-knn (needs family_embeddings).
+graph-prop could still hit some via dep-graph edges, which is why most
+of the 187 had predictions — but 11 fell through entirely.
 
-**Fix (operational):** rescan → `tag_library --recompute-families` →
-re-run the three predictor binaries.
+**Structural fix (landed):** `scanner::scan` now calls
+`tagging::family::recompute(conn)` after `tx.commit()`. Every scan is
+self-healing for family assignment. See
+[src-tauri/src/scanner.rs:222](src-tauri/src/scanner.rs:222).
+`recompute()` lives outside the scan transaction because it opens its
+own internal transaction (SQLite can't nest BEGIN); the operation is
+idempotent so a partial failure is fine to retry.
 
-**Fix (structural, recommended):** add `family::recompute(&tx)?;` after
-`deps::resolve_all(&tx)?;` in `src-tauri/src/scanner.rs` so every scan
-auto-links. Eliminates the wiring gap going forward. Tiny change; this
-is the right next move.
+**Cleanup for the historical residual:** the 187 packages already in
+the DB stay orphaned until the next scan runs (a no-op rescan triggers
+the new auto-recompute). After that, re-run the three predictor
+binaries to fill predictions on the newly-familied rows.
 
-Once the 187 get families, run the three predictors again and the
-"unpredicted" count drops to whatever truly has no signal (likely
-near-zero).
+After cleanup, the "unpredicted" count should drop to whatever truly
+has no signal — likely near zero.
 
 ### 2. Long-tail categories (Lighting+HDRI n=8, Audio n=1, etc.)
 
@@ -259,27 +262,24 @@ Multi-session conventions documented in [CLAUDE.md](CLAUDE.md):
 
 ## Open questions for the next session
 
-1. **Wire `family::recompute` into the scanner.** The right structural
-   fix for item #1 above. A two-line change to
-   [src-tauri/src/scanner.rs:219](src-tauri/src/scanner.rs:219) (add
-   `tagging::family::recompute(&tx)?;` after the existing
-   `deps::resolve_all(&tx)?;`) makes scans self-healing for family
-   assignment. Then re-running the three predictors after a scan
-   becomes the only manual step.
-2. **Wire `predicted_hub_category` into the UI** as a filter axis.
+1. **Wire `predicted_hub_category` into the UI** as a filter axis.
    99.7% coverage at ~90% mean accuracy is already useful. The
    manual-UI-correction flow for long-tail / disagreement cases would
    layer on top of this.
-3. **Confidence threshold for "show as predicted" in the UI:** ≥ 0.6
+2. **Confidence threshold for "show as predicted" in the UI:** ≥ 0.6
    has been the working cutoff for cascade write decisions; UI display
    can use the same threshold to dim / flag / hide.
-4. **Audio-pack-when-alone rule** (and similar singleton-set cases).
+3. **Audio-pack-when-alone rule** (and similar singleton-set cases).
    Small change in `predict_categories.rs`; needs a quick scan of
    which other kinds exhibit the same pattern.
-5. **Production-population eval** — a 30-50-row hand-labeled sample of
+4. **Production-population eval** — a 30-50-row hand-labeled sample of
    currently-unmatched packages would be the only honest measure of
    accuracy on the actual production-target population. Worth doing
-   once the residual stabilizes after the scanner fix.
+   once the historical 187 are cleaned up via the next scan + predictor
+   re-run.
+
+(The previous Open Question #1 — "Wire family::recompute into the
+scanner" — landed; see "What's not solved yet" §1 above.)
 
 ## Definition of done
 
