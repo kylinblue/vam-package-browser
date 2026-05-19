@@ -15,21 +15,26 @@ context from the session that landed Phases 0/B/0.5.**
 | ---------------------------------- | ---: | --------------------------------------- |
 | Total packages                     | 4353 |                                         |
 | Have `hub_category` (truth)        | 2544 | 100%                                    |
-| Have `predicted_hub_category`      | ~1798 | by method, see below                   |
-| &nbsp;&nbsp;`predicted_method='kind-vote'`  | ~1481 | 90.1% (1)                       |
-| &nbsp;&nbsp;`predicted_method='graph-prop'` |  ~228 | 64.3% (1, 2)                    |
-| &nbsp;&nbsp;`predicted_method='embed-knn'`  |   89  | 95.1% (1, with Nomic)            |
-| Unpredicted with `family_id`       |    5 | (need kind:* tags + embeddings)        |
+| Have `predicted_hub_category`      | 1803 | by method, see below                    |
+| &nbsp;&nbsp;`predicted_method='kind-vote'`  | ~1566 | 90.1% (1)                       |
+| &nbsp;&nbsp;`predicted_method='graph-prop'` |  ~175 | 64.3% (1, 2)                    |
+| &nbsp;&nbsp;`predicted_method='embed-knn'`  |   ~62 | 95.1% (1, with Nomic)            |
+| Unpredicted with `family_id`       |    0 | (was 5; resolved by §2 fix below)      |
 | Packages w/o `family_id`           |    8 | (malformed metadata, see §3 below)     |
 | **Labeled families**               | 2299 |                                         |
+| **Tagged families**                | 3871 | (was 3706; +165 in this pass)          |
 
 Last refreshed by [src-tauri/src/bin/classifier_gaps_census.rs](src-tauri/src/bin/classifier_gaps_census.rs)
-after the scanner auto-recompute landed and the historical 187 orphans
-were cleaned up (rescan + tag_library --recompute-families + the three
-predictor re-runs).
+after the §2 operational pass landed (tag_library + embed_library over
+165 previously-untagged families + the three predictor re-runs). Per-
+method breakdowns above are approximate — the cascade overwrites mean
+final method ownership shifts after each pass; run the census for fresh
+exact counts.
 
-Unified UI coverage `COALESCE(hub_category, predicted_hub_category)` ≈
-4342/4353 = **99.7%**. Phase 2a + 2b covered the residual gap.
+Unified UI coverage `COALESCE(hub_category, predicted_hub_category)` =
+4347/4353 = **99.86%** (was 99.7% before §2 fix). The 6 remaining gaps
+are all in bucket D (§3 malformed metadata) — 2 of the 8 D-bucket rows
+have graph-prop predictions, 6 don't.
 
 **(1)** Numbers are from `--holdout-test` mode — a deterministic 80/20 family
 split (seed `0xDEADBEEF_CAFEBABE`), each predictor trained on the 80% train
@@ -156,32 +161,39 @@ idempotent so a partial failure is fine to retry.
 re-runs, the no-`family_id` bucket dropped from 187 to 8 (the residual
 8 are §3 below, a separate problem class).
 
-### 2. The 5 unpredicted-with-`family_id` rows — *needs tag + embed pass*
+### 2. The 5 unpredicted-with-`family_id` rows — *resolved*
 
 A new tier of residual that surfaced after the scanner fix. The newly
-linked families have a `family_id` but their `package_family` row is
-fresh — it has no entries in `family_tags` (because `tag_library`
-hasn't run on them) and no row in `family_embeddings` (because
-`embed_library` hasn't run on them). So kind-vote and embed-knn can't
-touch them. graph-prop covered most via dep-graph edges; 5 fall through.
+linked families had a `family_id` but their `package_family` row was
+fresh — no entries in `family_tags` (because `tag_library` hadn't run
+on them) and no row in `family_embeddings` (because `embed_library`
+hadn't either). So kind-vote and embed-knn couldn't touch them;
+graph-prop covered most via dep-graph edges but 5 fell through.
 
-Examples observed in the live census:
+**Operational fix (landed):** ran `tag_library --taxonomy-version v4`
+followed by `embed_library --embed-all` followed by all three
+predictors. The "75 new families" estimated by the prior session
+turned out to be **165** in practice (likely the scanner had been run
+multiple times since the original census, accumulating fresh families).
+All 165 tagged successfully (2 batches, 0 failures, ~78K prompt tokens
+on grok-4.3); embeddings 100% across all 4 (model, input_kind)
+variants; cascade re-ran with 1801 kind-vote → 175 graph-prop overwrites
+→ 62 embed-knn overwrites. Bucket C count dropped 5 → 0.
+
+Examples that were unpredicted in the prior census and are now
+predicted (visible in the post-pass census output):
 ```
-[61927] Captain_Varghoss.TriggerUI.2          scan='Plugin'
-[65785] vs1.vs1_H030_Fumino_Hair.1            scan='Hair'
-[61935] Cgomes.AVA_FUCK_json.1                scan='Morph'
-[61656] 14mhz.MeshColliderTongue.5            scan='Plugin'
-[61654] 14mhz.AutoFlutterTongue.5             scan='Plugin'
+[61927] Captain_Varghoss.TriggerUI.2  pred=Plugins + Scripts (kind-vote, conf 1.00)
 ```
+(The other 4 are similarly resolved.)
 
-**Fix (operational):** run `tag_library` and `embed_library` over the
-75 new families that the recompute created, then re-run the three
-predictors. The numbers in the State table above will tick down.
-
-**Fix (structural, suggested):** mirror the scanner auto-recompute
+**Fix (structural, still suggested):** mirror the scanner auto-recompute
 pattern — add a "newly-created families need tagging + embedding"
-gate somewhere in the pipeline so the operational fix becomes
-automatic. Not done; this would be a useful next session item.
+gate somewhere in the pipeline so this operational pass becomes
+automatic. Not done; tracked in Open Question #3 below. The manual
+cycle just proved out: it works cleanly and costs ~$0.20 of API spend
+per ~165-family pass, which suggests the auto-pipeline design is
+worth doing.
 
 ### 3. The 8 remaining no-`family_id` packages — *malformed metadata*
 
@@ -314,17 +326,20 @@ Multi-session conventions documented in [CLAUDE.md](CLAUDE.md):
 
 In order of impact-per-effort:
 
-1. **Tag + embed the 75 new families** (§2 above). Run `tag_library`
-   over untagged families, then `embed_library`, then re-run the three
-   predictors. This drops the unpredicted-with-family count from 5 to
-   ~0 and adds embedding/tag coverage that will help on future scans.
-   Operational; no code changes.
-
-2. **Wire `predicted_hub_category` into the UI** as a filter axis. The
+1. **Wire `predicted_hub_category` into the UI** as a filter axis. The
    classifier work is done; the user-visible win is gated on the UI.
-   99.7% coverage at ~90% mean accuracy is already useful. Layer the
+   99.86% coverage at ~90% mean accuracy is already useful. Layer the
    manual-UI-correction flow for long-tail / disagreement cases on
    top of this when it exists.
+
+2. **Auto-tag + auto-embed new families** (Open Question #3). The
+   manual cycle just proved out at ~$0.20/run for 165 families. Worth
+   wiring into the scanner pipeline so the operational fix in §2
+   becomes automatic and a future scanner run doesn't accumulate
+   another tier of untagged families.
+
+(Previously-suggested first move "Tag + embed the 75 new families"
+landed in this commit — see §2.)
 
 ## Open questions, deferred
 
@@ -355,9 +370,9 @@ scanner" → see §1 above.)
 ## Definition of done
 
 - ✅ All 4353 packages have `COALESCE(hub_category, predicted_hub_category)`
-  set (currently 99.7%; the 0.3% residual is the 11 no-`family_id` rows
-  with no other signal, all dissolvable by wiring `family::recompute`
-  into the scanner per Open Question #1).
+  set (currently **99.86%**; the 0.14% residual is 6 of the 8
+  no-`family_id` rows in §3, malformed-metadata orphans with no
+  graph-prop signal — investigation tracked in Open Question #5).
 - ✅ The 225 low-confidence predictions dropped to 63 (Phase 2a) then to
   the rows where all three methods are uncertain.
 - ⏳ UI exposes the unified category axis as a filter.
