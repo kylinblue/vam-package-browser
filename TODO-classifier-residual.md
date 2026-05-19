@@ -122,58 +122,90 @@ near-optimal for the common case.
 
 ## What's not solved yet
 
-### 1. The 11 still-unpredicted packages
+The residual is dominated by one wiring gap (the 187 no-`family_id`
+packages) plus a handful of narrow model gaps. Verified by
+[src-tauri/src/bin/classifier_gaps_census.rs](src-tauri/src/bin/classifier_gaps_census.rs)
+— run it any time to refresh these numbers.
 
-After all three passes, 11 packages with `family_id` and a hub-match
-gap still have no `predicted_hub_category`. They have no kind:* tags,
-no labeled neighbors in the dep graph, and either no embedding or one
-whose nearest training family is below the cosine cutoff. Cheapest fix:
-copy the hub_category from a labeled sibling in the same `package_family`
-(see "Unlabeled siblings in labeled families" below — same fix).
+### 1. The 187 packages without `family_id`
 
-### 2. Unlabeled siblings in labeled families
+The dominant gap. `scanner::scan` ends its transaction with
+`deps::resolve_all()` but does NOT call `family::recompute()` — family
+assignment is on-demand via `tag_library --recompute-families`. So any
+package scanned after the last manual recompute sits with
+`family_id = NULL`, which makes it invisible to both kind-vote (needs
+family_tags) and embed-knn (needs family_embeddings). graph-prop can
+still hit some of them via dep-graph edges, which is why most of the
+187 do have predictions — but 11 fall through entirely.
 
-Many packages without `hub_category` are *versions* of a package whose
-other versions DID match the hub. Their `family_id` points to a
-`package_family` row where another sibling has `hub_category` set. None
-of the three predictors fills these in — they all gate on family-level
-unlabeled-ness. Trivial fix: propagate the family's `hub_category` to
-unlabeled siblings as `predicted_hub_category` with confidence 1.0 and
-`predicted_method='family-sibling'`. Probably ~150 rows. Not done in
-this pass; would be a tiny standalone binary.
+**Fix (operational):** rescan → `tag_library --recompute-families` →
+re-run the three predictor binaries.
 
-### 3. The 187 packages without `family_id`
+**Fix (structural, recommended):** add `family::recompute(&tx)?;` after
+`deps::resolve_all(&tx)?;` in `src-tauri/src/scanner.rs` so every scan
+auto-links. Eliminates the wiring gap going forward. Tiny change; this
+is the right next move.
 
-These are scanner residue — packages indexed before family-assignment
-ran, or with malformed metadata that prevented family creation.
-Investigation deferred; they show up as "Unknown" in any category-axis
-UI until they get a family.
+Once the 187 get families, run the three predictors again and the
+"unpredicted" count drops to whatever truly has no signal (likely
+near-zero).
 
-### 4. Long-tail categories (Lighting+HDRI n=8, Audio n=1, etc.)
+### 2. Long-tail categories (Lighting+HDRI n=8, Audio n=1, etc.)
 
-Persistent across all phases. kNN can't reliably find a single training
-example, and the per-class accuracy stays at 0% for these in CV /
-holdout. Manual UI correction is the right tool here — they're rare
-enough that one-by-one labeling is fine. Phase 4 (LLM) might also help
-cheaply if we want automation.
+kNN can't reliably classify into a class with n=1 training examples.
+**Self-correcting via hub-sync coverage** — every sync iteration both
+shrinks the unmatched set AND grows rare-category training data. The
+hub itself keeps adding resources, so periodic re-syncs are productive
+(noted as "whack-a-mole" in practice, but each whack is real progress).
+No separate classifier work needed; just keep syncing.
 
-### 5. Score-level fusion (deferred)
+Manual UI correction is the right escape hatch for the residual that
+remains after hub sync stabilizes.
+
+### 3. The `audio-pack`-when-alone case
+
+For families whose ONLY `kind:*` tag is `kind:audio-pack`, kind-vote
+predicts Scenes (because `P(Scenes | audio-pack) = 97%` in training —
+all `audio-pack` training rows co-occur with scene-related kinds). But
+intuitively a true audio-only pack should map to Audio.
+
+The voting model can't distinguish "alone" vs "co-occurring" — it
+sums per-kind distributions regardless of set size. Fix options
+(in order of cheapness):
+
+1. **Rule override** in `predict_categories.rs`: if `kinds == {audio-pack}`,
+   force `Audio` with confidence 1.0. Same pattern may apply to other
+   "true X pack when alone" cases worth auditing (`pose-pack`,
+   `morph-pack`, etc.).
+2. **Singleton-set feature:** add an indicator to the vote when the
+   family's kind set has size 1; the model can learn the special case.
+3. **Co-occurrence model:** train `P(hub | kind_set)` instead of
+   per-kind. More principled but sparse for rare combos.
+
+Option 1 is the right cheap win — bound it to kinds whose pure form is
+demonstrably a known long-tail category.
+
+### 4. Score-level fusion (deferred — confirmed not worth it now)
 
 Three predictions per row × confidence-weighted vote could beat the
 cascade on the ~50 cases where high-conf kind-vote and high-conf
-embed-knn disagree. Requires either a schema addition to persist all
-three predictions per row, or re-running each predictor in-memory in a
-fusion binary. Marginal lift; not done. Revisit if the matched→unmatched
-distribution-shift concern (see "Evaluation caveats" below) becomes
-operationally important.
+embed-knn disagree. Marginal lift; the cascade with embed-knn last is
+already near-optimal. Revisit only if a real evaluation (see
+"Evaluation caveats") motivates it.
 
-### 6. The `audio-pack` mapping is still counterintuitive
+## Items the previous handoff listed that turned out to be non-gaps
 
-97% of training rows with `kind:audio-pack` map to **Scenes**, not Audio
-— because the v4 LLM tags scene packages that include audio files with
-`audio-pack` as a secondary kind. Not a bug in any predictor (each is
-correctly learning the data), but worth being aware of when inspecting
-predictions or designing future text features.
+Caught by the census. Removed from the residual list above so a future
+session doesn't chase them:
+
+- **"~150 unlabeled siblings in labeled families."** Actual count:
+  **zero**. Hub matching is already family-consistent — when the hub
+  sync matches `Author.Package`, it sets `hub_category` on every
+  locally-installed version. No family-sibling propagation pass is
+  needed.
+- **"11 still-unpredicted packages with `family_id`."** Actual count:
+  **zero**. All 11 unpredicted packages live in the 187 no-`family_id`
+  bucket and resolve together with item #1 above.
 
 ## Evaluation caveats
 
@@ -227,25 +259,34 @@ Multi-session conventions documented in [CLAUDE.md](CLAUDE.md):
 
 ## Open questions for the next session
 
-1. **Family-sibling propagation?** Trivial 50-line binary that fills the
-   11 still-unpredicted + ~150 unlabeled-sibling cases. Highest-confidence
-   fix because the source is the family's own labeled sibling.
-2. **Wire `predicted_hub_category` into the UI?** 99.7% coverage at
-   ~90% mean accuracy is already useful. The Lighting+HDRI / Audio /
-   Guides long-tail probably needs a manual-correction UI flow eventually.
-3. **Confidence threshold for "show as predicted"?** ≥ 0.6 has been the
-   working threshold for cascade write decisions; the UI might dim or
-   flag rows below that.
-4. **Score-level fusion?** Marginal lift; deferred until distribution-shift
-   eval (see "Evaluation caveats") motivates it.
-5. **Production-population eval?** A 30-50-row hand-labeled sample of
+1. **Wire `family::recompute` into the scanner.** The right structural
+   fix for item #1 above. A two-line change to
+   [src-tauri/src/scanner.rs:219](src-tauri/src/scanner.rs:219) (add
+   `tagging::family::recompute(&tx)?;` after the existing
+   `deps::resolve_all(&tx)?;`) makes scans self-healing for family
+   assignment. Then re-running the three predictors after a scan
+   becomes the only manual step.
+2. **Wire `predicted_hub_category` into the UI** as a filter axis.
+   99.7% coverage at ~90% mean accuracy is already useful. The
+   manual-UI-correction flow for long-tail / disagreement cases would
+   layer on top of this.
+3. **Confidence threshold for "show as predicted" in the UI:** ≥ 0.6
+   has been the working cutoff for cascade write decisions; UI display
+   can use the same threshold to dim / flag / hide.
+4. **Audio-pack-when-alone rule** (and similar singleton-set cases).
+   Small change in `predict_categories.rs`; needs a quick scan of
+   which other kinds exhibit the same pattern.
+5. **Production-population eval** — a 30-50-row hand-labeled sample of
    currently-unmatched packages would be the only honest measure of
-   accuracy on the actual target distribution.
+   accuracy on the actual production-target population. Worth doing
+   once the residual stabilizes after the scanner fix.
 
 ## Definition of done
 
 - ✅ All 4353 packages have `COALESCE(hub_category, predicted_hub_category)`
-  set (currently 99.7%, residual = 11 + 187 no-family).
+  set (currently 99.7%; the 0.3% residual is the 11 no-`family_id` rows
+  with no other signal, all dissolvable by wiring `family::recompute`
+  into the scanner per Open Question #1).
 - ✅ The 225 low-confidence predictions dropped to 63 (Phase 2a) then to
   the rows where all three methods are uncertain.
 - ⏳ UI exposes the unified category axis as a filter.
