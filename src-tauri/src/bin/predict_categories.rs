@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use rusqlite::params;
-use vam_package_browser_lib::index;
+use vam_package_browser_lib::{holdout, index};
 
 const PREDICTED_METHOD: &str = "kind-vote";
 
@@ -28,6 +28,7 @@ const PREDICTED_METHOD: &str = "kind-vote";
 struct Args {
     db: Option<PathBuf>,
     dry_run: bool,
+    holdout_test: bool,
 }
 
 fn main() -> Result<()> {
@@ -41,45 +42,67 @@ fn main() -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("db path has no parent dir"))?
         .to_path_buf();
-    let _lock = SessionLock::acquire(&db_dir, "predict_categories (Phase 0.5 kind-vote)")?;
+    let op = if args.holdout_test {
+        "predict_categories (--holdout-test, read-only eval)"
+    } else {
+        "predict_categories (Phase 0.5 kind-vote)"
+    };
+    let _lock = SessionLock::acquire(&db_dir, op)?;
 
     let mut conn = index::open_and_migrate(&db_path)
         .with_context(|| format!("open index at {}", db_path.display()))?;
 
-    // 1. Load (package_id, kinds, hub_category) for every row that has a family
-    //    with at least one kind:* tag. Group concat the tags into a |-list so
-    //    we do one query instead of N.
-    let mut rows: Vec<(i64, Vec<String>, Option<String>)> = Vec::new();
+    // 1. Load (package_id, family_id, kinds, hub_category) for every row that
+    //    has a family with at least one kind:* tag. Group concat the tags into
+    //    a |-list so we do one query instead of N. family_id is required by
+    //    --holdout-test mode (split is by family, not by package).
+    #[derive(Clone)]
+    struct Row {
+        id: i64,
+        family_id: Option<i64>,
+        kinds: Vec<String>,
+        hub: Option<String>,
+    }
+    let mut rows: Vec<Row> = Vec::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT p.id, p.hub_category,
+            "SELECT p.id, p.family_id, p.hub_category,
                     (SELECT GROUP_CONCAT(ft.tag, '|') FROM family_tags ft
                      WHERE ft.family_id = p.family_id AND ft.tag LIKE 'kind:%') AS kinds
              FROM packages p",
         )?;
         let it = stmt.query_map([], |row| {
             let id: i64 = row.get(0)?;
-            let hub: Option<String> = row.get(1)?;
-            let kinds_str: Option<String> = row.get(2)?;
+            let family_id: Option<i64> = row.get(1)?;
+            let hub: Option<String> = row.get(2)?;
+            let kinds_str: Option<String> = row.get(3)?;
             let kinds: Vec<String> = kinds_str
                 .map(|s| s.split('|').map(|x| x.to_string()).collect())
                 .unwrap_or_default();
-            Ok((id, kinds, hub))
+            Ok(Row { id, family_id, kinds, hub })
         })?;
         for r in it {
             rows.push(r?);
         }
     }
 
-    let labeled: Vec<_> = rows
+    if args.holdout_test {
+        let tuples: Vec<(Option<i64>, Option<String>, Vec<String>)> = rows
+            .iter()
+            .map(|r| (r.family_id, r.hub.clone(), r.kinds.clone()))
+            .collect();
+        return run_holdout_test(&tuples);
+    }
+
+    let labeled: Vec<(i64, Vec<String>, String)> = rows
         .iter()
-        .filter(|(_, _, h)| h.is_some())
-        .map(|(id, k, h)| (*id, k.clone(), h.clone().unwrap()))
+        .filter(|r| r.hub.is_some())
+        .map(|r| (r.id, r.kinds.clone(), r.hub.clone().unwrap()))
         .collect();
-    let unlabeled: Vec<_> = rows
+    let unlabeled: Vec<(i64, Vec<String>)> = rows
         .iter()
-        .filter(|(_, _, h)| h.is_none())
-        .map(|(id, k, _)| (*id, k.clone()))
+        .filter(|r| r.hub.is_none())
+        .map(|r| (r.id, r.kinds.clone()))
         .collect();
 
     eprintln!(
@@ -192,6 +215,129 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Honest evaluation on a held-out 20% family split. Trains the kind-vote
+/// model on the 80% train families' labels, predicts only the 20% test
+/// families' labels, reports per-class accuracy. Does not write.
+///
+/// Same seed across all three predictor binaries (see `holdout.rs`) so the
+/// numbers from each are directly comparable on identical test data.
+fn run_holdout_test(
+    rows: &[(Option<i64>, Option<String>, Vec<String>)],
+) -> Result<()> {
+    let labeled_families: Vec<i64> = rows
+        .iter()
+        .filter(|(_, hub, _)| hub.is_some())
+        .filter_map(|(fid, _, _)| *fid)
+        .collect();
+    let (train_families, test_families) = holdout::split(&labeled_families);
+    eprintln!(
+        "holdout split: {} train families, {} test families (seed={:#x})",
+        train_families.len(),
+        test_families.len(),
+        holdout::HOLDOUT_SEED
+    );
+
+    // Train: only labeled rows whose family is in train.
+    let mut joint: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    let mut kind_total: HashMap<String, u32> = HashMap::new();
+    let mut train_rows = 0usize;
+    for (fid, hub, kinds) in rows {
+        let (Some(fid), Some(hub)) = (fid, hub.as_ref()) else {
+            continue;
+        };
+        if !train_families.contains(fid) {
+            continue;
+        }
+        train_rows += 1;
+        for k in kinds {
+            *joint.entry(k.clone()).or_default().entry(hub.clone()).or_insert(0) += 1;
+            *kind_total.entry(k.clone()).or_insert(0) += 1;
+        }
+    }
+    eprintln!("trained on {} rows ({} distinct kinds)", train_rows, kind_total.len());
+
+    // Predict: each test-family labeled row.
+    let mut total = 0u32;
+    let mut correct = 0u32;
+    let mut no_signal = 0u32;
+    let mut per_class_total: HashMap<String, u32> = HashMap::new();
+    let mut per_class_correct: HashMap<String, u32> = HashMap::new();
+    let mut confusion: HashMap<(String, String), u32> = HashMap::new();
+
+    for (fid, hub, kinds) in rows {
+        let (Some(fid), Some(truth)) = (fid, hub.as_ref()) else {
+            continue;
+        };
+        if !test_families.contains(fid) {
+            continue;
+        }
+        total += 1;
+        *per_class_total.entry(truth.clone()).or_insert(0) += 1;
+
+        let mut score: HashMap<String, f64> = HashMap::new();
+        for k in kinds {
+            let n = match kind_total.get(k) {
+                Some(&n) if n > 0 => n as f64,
+                _ => continue,
+            };
+            if let Some(hubs) = joint.get(k) {
+                for (hub, &c) in hubs {
+                    *score.entry(hub.clone()).or_insert(0.0) += c as f64 / n;
+                }
+            }
+        }
+        if score.is_empty() {
+            no_signal += 1;
+            *confusion
+                .entry((truth.clone(), "<no-signal>".to_string()))
+                .or_insert(0) += 1;
+            continue;
+        }
+        let (best, _) = score
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        if best == truth {
+            correct += 1;
+            *per_class_correct.entry(truth.clone()).or_insert(0) += 1;
+        } else {
+            *confusion
+                .entry((truth.clone(), best.clone()))
+                .or_insert(0) += 1;
+        }
+    }
+
+    eprintln!();
+    eprintln!("=== holdout-test on kind-vote ===");
+    eprintln!(
+        "overall: {}/{} = {:.1}% ({} with no kind:* signal)",
+        correct,
+        total,
+        100.0 * correct as f64 / total as f64,
+        no_signal
+    );
+    eprintln!("per-class accuracy:");
+    let mut classes: Vec<_> = per_class_total.iter().collect();
+    classes.sort_by(|a, b| b.1.cmp(a.1));
+    for (cls, &tot) in &classes {
+        let cor = per_class_correct.get(*cls).copied().unwrap_or(0);
+        eprintln!(
+            "  {:<25} {:>4}/{:<4} = {:>5.1}%",
+            cls,
+            cor,
+            tot,
+            100.0 * cor as f64 / tot as f64
+        );
+    }
+    eprintln!("top confusions (truth → predicted):");
+    let mut conf_vec: Vec<_> = confusion.iter().filter(|((t, p), _)| t != p).collect();
+    conf_vec.sort_by(|a, b| b.1.cmp(a.1));
+    for ((truth, pred), c) in conf_vec.iter().take(10) {
+        eprintln!("  {:<22} → {:<22} {}", truth, pred, c);
+    }
+    Ok(())
+}
+
 /// RAII semaphore for the shared `%APPDATA%/.../.session-active.lock` file.
 /// Refuses to acquire if the lock is already present (surfaces contents so the
 /// user can decide whether to override). Releases on Drop, regardless of how
@@ -246,8 +392,9 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--dry-run" => args.dry_run = true,
+            "--holdout-test" => args.holdout_test = true,
             "-h" | "--help" => {
-                eprintln!("usage: predict_categories [--db PATH] [--dry-run]");
+                eprintln!("usage: predict_categories [--db PATH] [--dry-run] [--holdout-test]");
                 std::process::exit(0);
             }
             other => return Err(anyhow!("unknown arg: {other}")),

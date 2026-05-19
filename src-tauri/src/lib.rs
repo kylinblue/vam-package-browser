@@ -1,6 +1,7 @@
 mod commands;
 pub mod deps;
 pub mod embedding;
+pub mod holdout;
 mod hub;
 pub mod index;
 pub mod meta;
