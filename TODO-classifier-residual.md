@@ -19,8 +19,14 @@ context from the session that landed Phases 0/B/0.5.**
 | &nbsp;&nbsp;`predicted_method='kind-vote'`  | ~1481 | 90.1% (1)                       |
 | &nbsp;&nbsp;`predicted_method='graph-prop'` |  ~228 | 64.3% (1, 2)                    |
 | &nbsp;&nbsp;`predicted_method='embed-knn'`  |   89  | 95.1% (1, with Nomic)            |
-| No prediction                      |   11 | —                                       |
-| Packages w/o `family_id`           |  187 | (skipped by all predictors)             |
+| Unpredicted with `family_id`       |    5 | (need kind:* tags + embeddings)        |
+| Packages w/o `family_id`           |    8 | (malformed metadata, see §3 below)     |
+| **Labeled families**               | 2299 |                                         |
+
+Last refreshed by [src-tauri/src/bin/classifier_gaps_census.rs](src-tauri/src/bin/classifier_gaps_census.rs)
+after the scanner auto-recompute landed and the historical 187 orphans
+were cleaned up (rescan + tag_library --recompute-families + the three
+predictor re-runs).
 
 Unified UI coverage `COALESCE(hub_category, predicted_hub_category)` ≈
 4342/4353 = **99.7%**. Phase 2a + 2b covered the residual gap.
@@ -127,15 +133,16 @@ packages) plus a handful of narrow model gaps. Verified by
 [src-tauri/src/bin/classifier_gaps_census.rs](src-tauri/src/bin/classifier_gaps_census.rs)
 — run it any time to refresh these numbers.
 
-### 1. The 187 packages without `family_id` — *structural fix landed*
+### 1. The original 187 no-`family_id` orphans — *resolved*
 
-The dominant gap. `scanner::scan` previously ended its transaction with
-`deps::resolve_all()` only — family assignment was on-demand via
-`tag_library --recompute-families`. Any package scanned after the last
-manual recompute sat with `family_id = NULL`, invisible to both
-kind-vote (needs family_tags) and embed-knn (needs family_embeddings).
-graph-prop could still hit some via dep-graph edges, which is why most
-of the 187 had predictions — but 11 fell through entirely.
+The dominant gap when this session started. `scanner::scan` previously
+ended its transaction with `deps::resolve_all()` only — family
+assignment was on-demand via `tag_library --recompute-families`. Any
+package scanned after the last manual recompute sat with
+`family_id = NULL`, invisible to both kind-vote (needs family_tags)
+and embed-knn (needs family_embeddings). graph-prop could still hit
+some via dep-graph edges, which is why most of the 187 had predictions
+— but 11 fell through entirely.
 
 **Structural fix (landed):** `scanner::scan` now calls
 `tagging::family::recompute(conn)` after `tx.commit()`. Every scan is
@@ -145,15 +152,58 @@ self-healing for family assignment. See
 own internal transaction (SQLite can't nest BEGIN); the operation is
 idempotent so a partial failure is fine to retry.
 
-**Cleanup for the historical residual:** the 187 packages already in
-the DB stay orphaned until the next scan runs (a no-op rescan triggers
-the new auto-recompute). After that, re-run the three predictor
-binaries to fill predictions on the newly-familied rows.
+**Historical cleanup:** done. After rescan + recompute + predictor
+re-runs, the no-`family_id` bucket dropped from 187 to 8 (the residual
+8 are §3 below, a separate problem class).
 
-After cleanup, the "unpredicted" count should drop to whatever truly
-has no signal — likely near zero.
+### 2. The 5 unpredicted-with-`family_id` rows — *needs tag + embed pass*
 
-### 2. Long-tail categories (Lighting+HDRI n=8, Audio n=1, etc.)
+A new tier of residual that surfaced after the scanner fix. The newly
+linked families have a `family_id` but their `package_family` row is
+fresh — it has no entries in `family_tags` (because `tag_library`
+hasn't run on them) and no row in `family_embeddings` (because
+`embed_library` hasn't run on them). So kind-vote and embed-knn can't
+touch them. graph-prop covered most via dep-graph edges; 5 fall through.
+
+Examples observed in the live census:
+```
+[61927] Captain_Varghoss.TriggerUI.2          scan='Plugin'
+[65785] vs1.vs1_H030_Fumino_Hair.1            scan='Hair'
+[61935] Cgomes.AVA_FUCK_json.1                scan='Morph'
+[61656] 14mhz.MeshColliderTongue.5            scan='Plugin'
+[61654] 14mhz.AutoFlutterTongue.5             scan='Plugin'
+```
+
+**Fix (operational):** run `tag_library` and `embed_library` over the
+75 new families that the recompute created, then re-run the three
+predictors. The numbers in the State table above will tick down.
+
+**Fix (structural, suggested):** mirror the scanner auto-recompute
+pattern — add a "newly-created families need tagging + embedding"
+gate somewhere in the pipeline so the operational fix becomes
+automatic. Not done; this would be a useful next session item.
+
+### 3. The 8 remaining no-`family_id` packages — *malformed metadata*
+
+Down from 187 after the cleanup. Looking at the examples, these all
+have empty (or `.`-only) `creator` and `package_name` fields:
+```
+[3794] ..2          scan='Unknown'
+[164]  ..6          scan='Unknown'
+[45048] .Dry_spell_(Sequencial_Anim).2   scan='Scene'   (predicted)
+```
+`family::recompute()` deliberately skips rows with empty creator or
+package_name (see its WHERE clause), so these stay orphaned. Root
+cause is upstream — the scanner couldn't extract usable
+creator/package_name from the .var's meta.json (or the filename
+parser failed).
+
+Investigation deferred. Likely a small set of broken .var files in
+the library; running `meta::parse` on them and logging the failure
+would surface what's going on. Either fix the parser, or surface them
+in the UI as "Unparseable" so the user can decide what to do.
+
+### 4. Long-tail categories (Lighting+HDRI n=8, Audio n=1, etc.)
 
 kNN can't reliably classify into a class with n=1 training examples.
 **Self-correcting via hub-sync coverage** — every sync iteration both
@@ -165,7 +215,7 @@ No separate classifier work needed; just keep syncing.
 Manual UI correction is the right escape hatch for the residual that
 remains after hub sync stabilizes.
 
-### 3. The `audio-pack`-when-alone case
+### 5. The `audio-pack`-when-alone case
 
 For families whose ONLY `kind:*` tag is `kind:audio-pack`, kind-vote
 predicts Scenes (because `P(Scenes | audio-pack) = 97%` in training —
@@ -188,7 +238,7 @@ sums per-kind distributions regardless of set size. Fix options
 Option 1 is the right cheap win — bound it to kinds whose pure form is
 demonstrably a known long-tail category.
 
-### 4. Score-level fusion (deferred — confirmed not worth it now)
+### 6. Score-level fusion (deferred — confirmed not worth it now)
 
 Three predictions per row × confidence-weighted vote could beat the
 cascade on the ~50 cases where high-conf kind-vote and high-conf
@@ -260,26 +310,47 @@ Multi-session conventions documented in [CLAUDE.md](CLAUDE.md):
   `migrate_vN_to_vN+1` to `index.rs`. v16 is the current head.
 - **Dev server port** — only one `tauri dev` across all worktrees.
 
-## Open questions for the next session
+## Suggested first move for the next session
 
-1. **Wire `predicted_hub_category` into the UI** as a filter axis.
-   99.7% coverage at ~90% mean accuracy is already useful. The
-   manual-UI-correction flow for long-tail / disagreement cases would
-   layer on top of this.
-2. **Confidence threshold for "show as predicted" in the UI:** ≥ 0.6
+In order of impact-per-effort:
+
+1. **Tag + embed the 75 new families** (§2 above). Run `tag_library`
+   over untagged families, then `embed_library`, then re-run the three
+   predictors. This drops the unpredicted-with-family count from 5 to
+   ~0 and adds embedding/tag coverage that will help on future scans.
+   Operational; no code changes.
+
+2. **Wire `predicted_hub_category` into the UI** as a filter axis. The
+   classifier work is done; the user-visible win is gated on the UI.
+   99.7% coverage at ~90% mean accuracy is already useful. Layer the
+   manual-UI-correction flow for long-tail / disagreement cases on
+   top of this when it exists.
+
+## Open questions, deferred
+
+1. **Confidence threshold for "show as predicted" in the UI.** ≥ 0.6
    has been the working cutoff for cascade write decisions; UI display
    can use the same threshold to dim / flag / hide.
-3. **Audio-pack-when-alone rule** (and similar singleton-set cases).
+2. **Audio-pack-when-alone rule** (and similar singleton-set cases).
    Small change in `predict_categories.rs`; needs a quick scan of
    which other kinds exhibit the same pattern.
+3. **Auto-tag + auto-embed new families.** Mirror the scanner auto-
+   recompute pattern: when `family::recompute()` creates new family
+   rows, queue them for tagging + embedding so the operational fix in
+   §2 above becomes automatic. Bigger change (touches the tag and
+   embed pipelines), worth doing once the manual cycle proves out the
+   shape.
 4. **Production-population eval** — a 30-50-row hand-labeled sample of
    currently-unmatched packages would be the only honest measure of
    accuracy on the actual production-target population. Worth doing
-   once the historical 187 are cleaned up via the next scan + predictor
-   re-run.
+   once the residual stabilizes.
+5. **Investigate the 8 malformed-metadata orphans** (§3 above). Find
+   out why creator/package_name came out empty for those .var files
+   and decide: fix the parser, or surface them in the UI as
+   "Unparseable" so the user can decide.
 
-(The previous Open Question #1 — "Wire family::recompute into the
-scanner" — landed; see "What's not solved yet" §1 above.)
+(Previously landed open questions: "wire `family::recompute` into the
+scanner" → see §1 above.)
 
 ## Definition of done
 
