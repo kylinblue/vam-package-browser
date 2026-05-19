@@ -71,7 +71,34 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v14_to_v15(&conn)?;
         conn.pragma_update(None, "user_version", 15)?;
     }
+    if current < 16 {
+        migrate_v15_to_v16(&conn)?;
+        conn.pragma_update(None, "user_version", 16)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
+    // Predicted hub_category for packages with no hub match. Kept in separate
+    // columns from `hub_category` (ground truth from hub sync) so a future hub
+    // sync never has to negotiate with model guesses. UI queries can union them
+    // via COALESCE(hub_category, predicted_hub_category) for display.
+    //
+    // `predicted_method` is the producer phase ('kind-vote', 'embed-knn',
+    // 'graph-prop', 'llm', 'manual') so later phases can overwrite earlier
+    // predictions and we keep provenance.
+    conn.execute_batch(
+        r#"
+        ALTER TABLE packages ADD COLUMN predicted_hub_category TEXT;
+        ALTER TABLE packages ADD COLUMN predicted_method       TEXT;
+        ALTER TABLE packages ADD COLUMN predicted_confidence   REAL;
+
+        CREATE INDEX IF NOT EXISTS idx_packages_predicted_hub
+            ON packages(predicted_hub_category)
+            WHERE predicted_hub_category IS NOT NULL;
+        "#,
+    )?;
+    Ok(())
 }
 
 fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
