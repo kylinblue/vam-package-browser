@@ -1861,6 +1861,45 @@ html, body, #root {
   cursor: help;
 }
 
+/* Muted "(was X)" annotation shown after an overridden value so the user
+   can see both the current override and the pristine pre-override
+   value at a glance. The arrow-like → could be added later if needed,
+   but plain "was X" reads clearly. */
+.override-original {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.override-original::before {
+  content: "← ";
+  opacity: 0.6;
+}
+
+/* Type chip when the underlying package_type is user-overridden:
+   subtle accent + slight weight bump so the "I picked this" signal is
+   readable next to the regular subtitle text. */
+.detail-type-link-overridden {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* Author override row sits below the hub-meta badges (or as the only
+   override-info element when the package isn't hub-matched). */
+.detail-hub-author-override {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--fg);
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.detail-hub-author-override strong {
+  color: var(--accent);
+  font-weight: 500;
+}
+
 .hub-tier-locked {
   border-color: var(--accent);
   color: var(--fg);

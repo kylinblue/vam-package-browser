@@ -243,20 +243,35 @@ export function DetailView({
               </div>
               <div className="detail-subtitle">
                 <button
-                  className="detail-type-link"
+                  className={`detail-type-link ${
+                    pkg.package_type_manual === 1
+                      ? "detail-type-link-overridden"
+                      : ""
+                  }`}
                   onClick={() => onFilterByType(pkg.package_type)}
                   title="Filter grid by this type"
                 >
                   {pkg.package_type}
                 </button>
                 {pkg.package_type_manual === 1 && (
-                  <span
-                    className="override-lock"
-                    title="Type is locked by user override — scanner won't reclassify on rescan. Use Restore in the detail panel to release."
-                    aria-label="Locked override"
-                  >
-                    🔒
-                  </span>
+                  <>
+                    <span
+                      className="override-lock"
+                      title="Type is locked by user override — scanner won't reclassify on rescan. Use ↺ Restore in the Overrides section."
+                      aria-label="Locked override"
+                    >
+                      🔒
+                    </span>
+                    {pkg.package_type_original &&
+                      pkg.package_type_original !== pkg.package_type && (
+                        <span
+                          className="override-original"
+                          title="Value before your override. Restore to revert."
+                        >
+                          was {pkg.package_type_original}
+                        </span>
+                      )}
+                  </>
                 )}
                 <span>· {formatSize(pkg.file_size)}</span>
                 <span title="When this .var was last touched on disk">
@@ -634,19 +649,31 @@ function HubInfoSection({
                 {tierLabel}
               </span>
               {pkg.hub_category && (
-                <span
-                  className={`hub-tier-badge hub-tier-category ${
-                    pkg.hub_category_manual === 1 ? "hub-tier-locked" : ""
-                  }`}
-                  title={
-                    pkg.hub_category_manual === 1
-                      ? "Category is locked by user override — auto-sync won't change it."
-                      : undefined
-                  }
-                >
-                  {pkg.hub_category_manual === 1 ? "🔒 " : ""}
-                  {pkg.hub_category}
-                </span>
+                <>
+                  <span
+                    className={`hub-tier-badge hub-tier-category ${
+                      pkg.hub_category_manual === 1 ? "hub-tier-locked" : ""
+                    }`}
+                    title={
+                      pkg.hub_category_manual === 1
+                        ? "Category is locked by user override — auto-sync won't change it."
+                        : undefined
+                    }
+                  >
+                    {pkg.hub_category_manual === 1 ? "🔒 " : ""}
+                    {pkg.hub_category}
+                  </span>
+                  {pkg.hub_category_manual === 1 &&
+                    pkg.hub_category_original &&
+                    pkg.hub_category_original !== pkg.hub_category && (
+                      <span
+                        className="override-original"
+                        title="Hub category before your override. Restore to revert."
+                      >
+                        was {pkg.hub_category_original}
+                      </span>
+                    )}
+                </>
               )}
               {pkg.hub_license && (
                 <span className="hub-tier-badge hub-tier-license">
@@ -669,6 +696,25 @@ function HubInfoSection({
             link; metadata fills in on the next sync.
           </div>
         ))}
+      {/* hub_author isn't surfaced as a primary badge above, but when the
+          user has overridden it, show a line so they can see what's set
+          vs. what the hub reported. Renders in all view modes because
+          the override propagates author-wide. */}
+      {pkg.hub_author_manual === 1 && (
+        <div className="detail-hub-author-override">
+          <span className="override-lock" title="Author override is locked.">
+            🔒
+          </span>
+          <span> author: </span>
+          <strong>{pkg.hub_author ?? "(empty)"}</strong>
+          {pkg.hub_author_original &&
+            pkg.hub_author_original !== pkg.hub_author && (
+              <span className="override-original">
+                was {pkg.hub_author_original}
+              </span>
+            )}
+        </div>
+      )}
 
       <div className="detail-action-row">
         {isFetched && pkg.hub_url && (

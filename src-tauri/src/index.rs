@@ -87,7 +87,42 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v18_to_v19(&conn)?;
         conn.pragma_update(None, "user_version", 19)?;
     }
+    if current < 20 {
+        migrate_v19_to_v20(&conn)?;
+        conn.pragma_update(None, "user_version", 20)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
+    // Snapshot columns for the three overrideable fields. When the user
+    // does their first set_* override on a row, the previous (auto-
+    // assigned) value is stashed here so the UI can show "X (was Y)"
+    // and so clear_override can restore the prior value without needing
+    // another sync / scan.
+    //
+    // Defensively add-if-absent — same parallel-session-collision lesson
+    // from v19. If another branch took v20 first with different content,
+    // this still ends up with our columns present, and the user_version
+    // counter just advances.
+    add_column_if_absent(conn, "package_type_original", "TEXT")?;
+    add_column_if_absent(conn, "hub_category_original", "TEXT")?;
+    add_column_if_absent(conn, "hub_author_original", "TEXT")?;
+    Ok(())
+}
+
+fn add_column_if_absent(conn: &Connection, name: &str, decl: &str) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('packages') WHERE name = ?1",
+        [name],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if !exists {
+        conn.execute_batch(&format!(
+            "ALTER TABLE packages ADD COLUMN {name} {decl};"
+        ))?;
+    }
+    Ok(())
 }
 
 fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {

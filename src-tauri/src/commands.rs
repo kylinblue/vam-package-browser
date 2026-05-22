@@ -90,6 +90,12 @@ pub struct PackageRow {
     pub hub_category_manual: i64,
     pub hub_author_manual: i64,
     pub package_type_manual: i64,
+    /// Pristine pre-override snapshots from v20. Populated on the first
+    /// set_* override; restored on clear_override. NULL when the field
+    /// was never overridden, or after a restore.
+    pub hub_category_original: Option<String>,
+    pub hub_author_original: Option<String>,
+    pub package_type_original: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -180,6 +186,7 @@ pub fn query_packages(
                 hub_billing_tier, hub_is_hub_hosted, hub_license,
                 hub_lastmod, hub_external_url, hub_match_method,
                 hub_category_manual, hub_author_manual, package_type_manual,
+                hub_category_original, hub_author_original, package_type_original,
                 {TAGS_SUBQUERY} AS tags
          FROM packages
          {where_clause}
@@ -241,7 +248,10 @@ pub fn query_packages(
                 hub_category_manual: row.get(39)?,
                 hub_author_manual: row.get(40)?,
                 package_type_manual: row.get(41)?,
-                tags: split_tags(row.get::<_, Option<String>>(42)?),
+                hub_category_original: row.get(42)?,
+                hub_author_original: row.get(43)?,
+                package_type_original: row.get(44)?,
+                tags: split_tags(row.get::<_, Option<String>>(45)?),
             })
         })
         .map_err(map_err)?
@@ -2096,6 +2106,7 @@ pub fn get_package_detail(
                     hub_billing_tier, hub_is_hub_hosted, hub_license,
                     hub_lastmod, hub_external_url, hub_match_method,
                     hub_category_manual, hub_author_manual, package_type_manual,
+                    hub_category_original, hub_author_original, package_type_original,
                     {TAGS_SUBQUERY} AS tags
              FROM packages WHERE id = ?1",
         );
@@ -2146,7 +2157,10 @@ pub fn get_package_detail(
                 hub_category_manual: r.get(40)?,
                 hub_author_manual: r.get(41)?,
                 package_type_manual: r.get(42)?,
-                tags: split_tags(r.get::<_, Option<String>>(43)?),
+                hub_category_original: r.get(43)?,
+                hub_author_original: r.get(44)?,
+                package_type_original: r.get(45)?,
+                tags: split_tags(r.get::<_, Option<String>>(46)?),
             };
             let preview: Option<String> = r.get(33)?;
             Ok((row, preview))
@@ -2914,6 +2928,7 @@ pub fn get_packages_by_ids(
                 hub_billing_tier, hub_is_hub_hosted, hub_license,
                 hub_lastmod, hub_external_url, hub_match_method,
                 hub_category_manual, hub_author_manual, package_type_manual,
+                hub_category_original, hub_author_original, package_type_original,
                 {TAGS_SUBQUERY} AS tags
          FROM packages WHERE id IN ({ids_csv})"
     );
@@ -2963,7 +2978,10 @@ pub fn get_packages_by_ids(
                 hub_category_manual: row.get(39)?,
                 hub_author_manual: row.get(40)?,
                 package_type_manual: row.get(41)?,
-                tags: split_tags(row.get::<_, Option<String>>(42)?),
+                hub_category_original: row.get(42)?,
+                hub_author_original: row.get(43)?,
+                package_type_original: row.get(44)?,
+                tags: split_tags(row.get::<_, Option<String>>(45)?),
             })
         })
         .map_err(map_err)?
@@ -3289,26 +3307,33 @@ pub async fn set_hub_category(
         let mut report = CategoryReport::default();
 
         for &package_id in &package_ids {
-            // Propagate SQL errors (e.g. missing column from a botched
-            // migration) instead of swallowing them — otherwise the UI
-            // gets a misleading "Updated 0 packages" success toast and
-            // the user has no idea why nothing changed.
+            // Snapshot the current hub_category into hub_category_original
+            // on the FIRST override only — the CASE clause preserves the
+            // pristine value across re-overrides so "(was X)" always
+            // reflects the original auto-assigned classification, not the
+            // user's previous override choice.
             let affected = tx
                 .execute(
                     "UPDATE packages
-                     SET hub_category = ?1, hub_category_manual = 1
+                     SET hub_category_original = CASE WHEN hub_category_manual = 0
+                                                      THEN hub_category
+                                                      ELSE hub_category_original END,
+                         hub_category = ?1,
+                         hub_category_manual = 1
                      WHERE id = ?2",
                     params![&category, package_id],
                 )
                 .map_err(|e| format!("set_hub_category id {package_id}: {e}"))?;
             if affected == 1 {
                 report.directly_updated += 1;
-                // Sibling propagation. Unlike propagate_hub_match this
-                // is unconditional — see this command's doc comment.
                 let prop = tx
                     .execute(
                         "UPDATE packages
-                         SET hub_category = ?1, hub_category_manual = 1
+                         SET hub_category_original = CASE WHEN hub_category_manual = 0
+                                                          THEN hub_category
+                                                          ELSE hub_category_original END,
+                             hub_category = ?1,
+                             hub_category_manual = 1
                          WHERE id != ?2
                            AND creator      = (SELECT creator      FROM packages WHERE id = ?2)
                            AND package_name = (SELECT package_name FROM packages WHERE id = ?2)",
@@ -3399,7 +3424,11 @@ pub async fn set_hub_author(
             let affected = tx
                 .execute(
                     "UPDATE packages
-                     SET hub_author = ?1, hub_author_manual = 1
+                     SET hub_author_original = CASE WHEN hub_author_manual = 0
+                                                    THEN hub_author
+                                                    ELSE hub_author_original END,
+                         hub_author = ?1,
+                         hub_author_manual = 1
                      WHERE id = ?2",
                     params![&hub_author, package_id],
                 )
@@ -3429,7 +3458,11 @@ pub async fn set_hub_author(
                 .join(",");
             let sql = format!(
                 "UPDATE packages
-                 SET hub_author = ?1, hub_author_manual = 1
+                 SET hub_author_original = CASE WHEN hub_author_manual = 0
+                                                THEN hub_author
+                                                ELSE hub_author_original END,
+                     hub_author = ?1,
+                     hub_author_manual = 1
                  WHERE creator = ?2
                    AND id NOT IN ({ids_csv})"
             );
@@ -3515,19 +3548,25 @@ pub async fn set_package_type(
             let affected = tx
                 .execute(
                     "UPDATE packages
-                     SET package_type = ?1, package_type_manual = 1
+                     SET package_type_original = CASE WHEN package_type_manual = 0
+                                                      THEN package_type
+                                                      ELSE package_type_original END,
+                         package_type = ?1,
+                         package_type_manual = 1
                      WHERE id = ?2",
                     params![&package_type, package_id],
                 )
                 .map_err(|e| format!("set_package_type id {package_id}: {e}"))?;
             if affected == 1 {
                 report.directly_updated += 1;
-                // Sibling propagation — same creator + package_name
-                // across versions. Unconditional within scope.
                 let prop = tx
                     .execute(
                         "UPDATE packages
-                         SET package_type = ?1, package_type_manual = 1
+                         SET package_type_original = CASE WHEN package_type_manual = 0
+                                                          THEN package_type
+                                                          ELSE package_type_original END,
+                             package_type = ?1,
+                             package_type_manual = 1
                          WHERE id != ?2
                            AND creator      = (SELECT creator      FROM packages WHERE id = ?2)
                            AND package_name = (SELECT package_name FROM packages WHERE id = ?2)",
@@ -3591,21 +3630,35 @@ pub async fn clear_override(
         let now = unix_now();
 
         for &package_id in &package_ids {
+            // Restoring an override pulls the pristine value back from
+            // the _original snapshot (set when the user first ran the
+            // matching set_* command). COALESCE handles the edge case
+            // where _original is NULL — leaves the current value alone
+            // rather than nulling it out.
             let n = match field.as_str() {
                 "category" => tx.execute(
-                    "UPDATE packages SET hub_category_manual = 0
+                    "UPDATE packages SET
+                       hub_category = COALESCE(hub_category_original, hub_category),
+                       hub_category_original = NULL,
+                       hub_category_manual = 0
                      WHERE id = ?1
                        OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
                        AND package_name = (SELECT package_name FROM packages WHERE id = ?1))",
                     params![package_id],
                 ),
                 "author" => tx.execute(
-                    "UPDATE packages SET hub_author_manual = 0
+                    "UPDATE packages SET
+                       hub_author = COALESCE(hub_author_original, hub_author),
+                       hub_author_original = NULL,
+                       hub_author_manual = 0
                      WHERE creator = (SELECT creator FROM packages WHERE id = ?1)",
                     params![package_id],
                 ),
                 "type" => tx.execute(
-                    "UPDATE packages SET package_type_manual = 0
+                    "UPDATE packages SET
+                       package_type = COALESCE(package_type_original, package_type),
+                       package_type_original = NULL,
+                       package_type_manual = 0
                      WHERE id = ?1
                        OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
                        AND package_name = (SELECT package_name FROM packages WHERE id = ?1))",

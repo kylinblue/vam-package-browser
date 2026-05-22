@@ -69,6 +69,12 @@ export interface PackageRow {
   hub_category_manual: number;
   hub_author_manual: number;
   package_type_manual: number;
+  /** Pristine pre-override snapshots. Populated by set_* on first
+   *  override; restored by clear_override. NULL when never overridden
+   *  or after a restore. UI shows "X (was Y)" when both are present. */
+  hub_category_original: string | null;
+  hub_author_original: string | null;
+  package_type_original: string | null;
 }
 
 export type SortField =
