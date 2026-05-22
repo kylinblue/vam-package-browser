@@ -83,7 +83,41 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v17_to_v18(&conn)?;
         conn.pragma_update(None, "user_version", 18)?;
     }
+    if current < 19 {
+        migrate_v18_to_v19(&conn)?;
+        conn.pragma_update(None, "user_version", 19)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
+    // Backfill for parallel-session migration collision.
+    //
+    // On this branch v16 was supposed to add `hub_category_manual`. But on
+    // databases that another session's branch took to v16 first (with a
+    // different schema change — observed: predicted_hub_category /
+    // predicted_method / predicted_confidence columns), the user_version
+    // counter advanced past 16 and my v16 migration was skipped, leaving
+    // the column missing while subsequent v17/v18 ran fine.
+    //
+    // This migration adds the column idempotently — only if it's actually
+    // absent — so it's safe to run on a freshly-created DB (where v16
+    // already added it) AND on the diverged DB (where it's missing).
+    //
+    // Going forward the cleaner pattern would be defensive ALTER ADD in
+    // every migration that adds columns, but that's a wider refactor; one
+    // backfill is sufficient for the immediate breakage.
+    let has_col: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('packages') WHERE name = 'hub_category_manual'",
+        [],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if !has_col {
+        conn.execute_batch(
+            "ALTER TABLE packages ADD COLUMN hub_category_manual INTEGER DEFAULT 0;",
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {

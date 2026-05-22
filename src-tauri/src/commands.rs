@@ -3271,38 +3271,37 @@ pub async fn set_hub_category(
         let mut report = CategoryReport::default();
 
         for &package_id in &package_ids {
-            let r = tx.execute(
-                "UPDATE packages
-                 SET hub_category = ?1, hub_category_manual = 1
-                 WHERE id = ?2",
-                params![&category, package_id],
-            );
-            match r {
-                Ok(1) => {
-                    report.directly_updated += 1;
-                    // Sibling propagation. Unlike propagate_hub_match this
-                    // is unconditional — see this command's doc comment.
-                    let prop = tx.execute(
+            // Propagate SQL errors (e.g. missing column from a botched
+            // migration) instead of swallowing them — otherwise the UI
+            // gets a misleading "Updated 0 packages" success toast and
+            // the user has no idea why nothing changed.
+            let affected = tx
+                .execute(
+                    "UPDATE packages
+                     SET hub_category = ?1, hub_category_manual = 1
+                     WHERE id = ?2",
+                    params![&category, package_id],
+                )
+                .map_err(|e| format!("set_hub_category id {package_id}: {e}"))?;
+            if affected == 1 {
+                report.directly_updated += 1;
+                // Sibling propagation. Unlike propagate_hub_match this
+                // is unconditional — see this command's doc comment.
+                let prop = tx
+                    .execute(
                         "UPDATE packages
                          SET hub_category = ?1, hub_category_manual = 1
                          WHERE id != ?2
                            AND creator      = (SELECT creator      FROM packages WHERE id = ?2)
                            AND package_name = (SELECT package_name FROM packages WHERE id = ?2)",
                         params![&category, package_id],
-                    );
-                    match prop {
-                        Ok(n) => report.siblings_updated += n as i64,
-                        Err(e) => eprintln!(
-                            "set_hub_category: sibling propagate failed for id {package_id}: {e}"
-                        ),
-                    }
-                }
-                Ok(_) => {
-                    eprintln!("set_hub_category: id {package_id} not found");
-                }
-                Err(e) => {
-                    eprintln!("set_hub_category: id {package_id} failed: {e}");
-                }
+                    )
+                    .map_err(|e| {
+                        format!("set_hub_category sibling propagate id {package_id}: {e}")
+                    })?;
+                report.siblings_updated += prop as i64;
+            } else {
+                eprintln!("set_hub_category: id {package_id} not found");
             }
         }
 
@@ -3379,23 +3378,19 @@ pub async fn set_hub_author(
                 eprintln!("set_hub_author: id {package_id} not found");
                 continue;
             };
-            let r = tx.execute(
-                "UPDATE packages
-                 SET hub_author = ?1, hub_author_manual = 1
-                 WHERE id = ?2",
-                params![&hub_author, package_id],
-            );
-            match r {
-                Ok(1) => {
-                    report.directly_updated += 1;
-                    creators_touched.insert(creator);
-                }
-                Ok(_) | Err(_) => {
-                    eprintln!(
-                        "set_hub_author: id {package_id} failed: {:?}",
-                        r.err()
-                    );
-                }
+            let affected = tx
+                .execute(
+                    "UPDATE packages
+                     SET hub_author = ?1, hub_author_manual = 1
+                     WHERE id = ?2",
+                    params![&hub_author, package_id],
+                )
+                .map_err(|e| format!("set_hub_author id {package_id}: {e}"))?;
+            if affected == 1 {
+                report.directly_updated += 1;
+                creators_touched.insert(creator);
+            } else {
+                eprintln!("set_hub_author: id {package_id} not found");
             }
         }
 
@@ -3420,15 +3415,10 @@ pub async fn set_hub_author(
                  WHERE creator = ?2
                    AND id NOT IN ({ids_csv})"
             );
-            let prop = tx.execute(&sql, params![&hub_author, creator]);
-            match prop {
-                Ok(n) => report.authors_updated += n as i64,
-                Err(e) => {
-                    eprintln!(
-                        "set_hub_author: author-wide propagate failed for creator {creator}: {e}"
-                    );
-                }
-            }
+            let n = tx.execute(&sql, params![&hub_author, creator]).map_err(|e| {
+                format!("set_hub_author author-wide propagate for {creator}: {e}")
+            })?;
+            report.authors_updated += n as i64;
         }
 
         tx.commit().map_err(|e| format!("tx commit: {e}"))?;
@@ -3504,38 +3494,33 @@ pub async fn set_package_type(
         let mut report = PackageTypeReport::default();
 
         for &package_id in &package_ids {
-            let r = tx.execute(
-                "UPDATE packages
-                 SET package_type = ?1, package_type_manual = 1
-                 WHERE id = ?2",
-                params![&package_type, package_id],
-            );
-            match r {
-                Ok(1) => {
-                    report.directly_updated += 1;
-                    // Sibling propagation — same creator + package_name
-                    // across versions. Unconditional within scope.
-                    let prop = tx.execute(
+            let affected = tx
+                .execute(
+                    "UPDATE packages
+                     SET package_type = ?1, package_type_manual = 1
+                     WHERE id = ?2",
+                    params![&package_type, package_id],
+                )
+                .map_err(|e| format!("set_package_type id {package_id}: {e}"))?;
+            if affected == 1 {
+                report.directly_updated += 1;
+                // Sibling propagation — same creator + package_name
+                // across versions. Unconditional within scope.
+                let prop = tx
+                    .execute(
                         "UPDATE packages
                          SET package_type = ?1, package_type_manual = 1
                          WHERE id != ?2
                            AND creator      = (SELECT creator      FROM packages WHERE id = ?2)
                            AND package_name = (SELECT package_name FROM packages WHERE id = ?2)",
                         params![&package_type, package_id],
-                    );
-                    match prop {
-                        Ok(n) => report.siblings_updated += n as i64,
-                        Err(e) => eprintln!(
-                            "set_package_type: sibling propagate failed for id {package_id}: {e}"
-                        ),
-                    }
-                }
-                Ok(_) => {
-                    eprintln!("set_package_type: id {package_id} not found");
-                }
-                Err(e) => {
-                    eprintln!("set_package_type: id {package_id} failed: {e}");
-                }
+                    )
+                    .map_err(|e| {
+                        format!("set_package_type sibling propagate id {package_id}: {e}")
+                    })?;
+                report.siblings_updated += prop as i64;
+            } else {
+                eprintln!("set_package_type: id {package_id} not found");
             }
         }
 
