@@ -625,6 +625,25 @@ pub fn rename_preset(
         .map_err(map_err)
 }
 
+/// All package ids the user has marked as favorite. Drives the
+/// LoadVisibilityModal "Load favorites" quick action: seeds the closure
+/// with the favorited set, deps follow automatically.
+#[tauri::command]
+pub fn list_favorite_package_ids(
+    state: State<'_, AppState>,
+) -> Result<Vec<i64>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare("SELECT id FROM packages WHERE is_favorite = 1 ORDER BY id")
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
 /// Distinct creators across the supplied package ids, ordered
 /// case-insensitively. Used by the LoadVisibilityModal's per-author
 /// toggle: shows the user which authors they'd be seeding with if they

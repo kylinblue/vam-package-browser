@@ -83,6 +83,13 @@ interface Props {
    *  visibility-preset feature. Wired in by a separate session — see
    *  TODO-visibility-presets.md (planned). */
   onSetVisibility?: (ids: number[]) => void;
+  /** Optional handler for the "Select all visible" action. App.tsx
+   *  passes a callback that selects every package currently in the
+   *  filtered grid view. Disabled when the visible list is empty. */
+  onSelectAllVisible?: () => void;
+  /** Count of packages currently in the filtered view. Drives the
+   *  Select-all button's label + disabled state. */
+  visibleCount?: number;
 }
 
 export function SelectionActionBar({
@@ -93,6 +100,8 @@ export function SelectionActionBar({
   onClear,
   onActionResult,
   onSetVisibility,
+  onSelectAllVisible,
+  visibleCount,
 }: Props) {
   const isFetched = viewMode === "fetched";
   const classifyLabel = isFetched ? "Override category…" : "Override type…";
@@ -387,6 +396,25 @@ export function SelectionActionBar({
           }
         >
           Set visibility…
+        </button>
+        <button
+          type="button"
+          className="selection-bar-action"
+          onClick={() => onSelectAllVisible?.()}
+          disabled={
+            !onSelectAllVisible ||
+            busy !== null ||
+            (visibleCount ?? 0) === 0
+          }
+          title={
+            !onSelectAllVisible
+              ? "Select-all not wired by host"
+              : (visibleCount ?? 0) === 0
+                ? "Nothing visible to select"
+                : `Select all ${(visibleCount ?? 0).toLocaleString()} packages in the current filtered view`
+          }
+        >
+          Select all{visibleCount && visibleCount > 0 ? ` (${visibleCount.toLocaleString()})` : ""}
         </button>
         <button
           type="button"

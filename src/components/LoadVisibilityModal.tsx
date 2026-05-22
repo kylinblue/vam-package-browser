@@ -6,6 +6,7 @@ import {
   getPreset,
   listCreators,
   listCreatorsForPackages,
+  listFavoritePackageIds,
   listPresets,
   loadVisibility,
   unloadAll,
@@ -215,6 +216,26 @@ export function LoadVisibilityModal({
     }
   }, [onActionResult]);
 
+  const handleLoadFavorites = useCallback(async () => {
+    setBusy(true);
+    try {
+      const ids = await listFavoritePackageIds();
+      if (ids.length === 0) {
+        onActionResult({
+          kind: "error",
+          text:
+            "No favorites yet — star packages from the detail view or grid first.",
+        });
+        return;
+      }
+      setActiveSeeds({ creators: [], package_ids: ids });
+    } catch (e) {
+      onActionResult({ kind: "error", text: `Load favorites failed: ${e}` });
+    } finally {
+      setBusy(false);
+    }
+  }, [onActionResult]);
+
   const handleUnloadAllSeeds = useCallback(() => {
     setActiveSeeds(null);
   }, []);
@@ -275,6 +296,15 @@ export function LoadVisibilityModal({
             title="Set the target to the entire library (every author). Closure pulls in deps automatically."
           >
             Load all
+          </button>
+          <button
+            type="button"
+            style={quickActionButtonStyle}
+            onClick={handleLoadFavorites}
+            disabled={busy}
+            title="Set the target to every favorite-marked package. Closure pulls in deps automatically."
+          >
+            Load favorites
           </button>
           <button
             type="button"
@@ -688,7 +718,7 @@ const cardStyle: React.CSSProperties = {
   border: "1px solid var(--border)",
   borderRadius: 8,
   padding: 24,
-  width: 480,
+  width: 640,
   maxWidth: "92vw",
   maxHeight: "90vh",
   overflowY: "auto",
@@ -904,6 +934,8 @@ const quickActionButtonStyle: React.CSSProperties = {
   padding: "4px 12px",
   cursor: "pointer",
   fontWeight: 600,
+  whiteSpace: "nowrap",
+  flexShrink: 0,
 };
 
 const quickActionsHelpStyle: React.CSSProperties = {

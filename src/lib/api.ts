@@ -558,6 +558,12 @@ export async function listCreatorsForPackages(
   return invoke<string[]>("list_creators_for_packages", { packageIds });
 }
 
+/** Every package id marked as favorite (is_favorite = 1). Powers the
+ *  modal's "Load favorites" quick action. */
+export async function listFavoritePackageIds(): Promise<number[]> {
+  return invoke<number[]>("list_favorite_package_ids");
+}
+
 export interface ThumbProgress {
   id: number;
   ok: boolean;

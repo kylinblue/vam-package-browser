@@ -1017,6 +1017,15 @@ export default function App() {
           setVisibilityModalIds(ids);
           setVisibilityModalOpen(true);
         }}
+        // Select-all-visible: takes the current filtered grid view
+        // (visiblePackages, which reflects all toolbar + chip filters
+        // plus the client-side errorsOnly / favoritesOnly / include-
+        // hidden flags) and selects every id in it.
+        onSelectAllVisible={() => {
+          setSelectedIds(new Set(visiblePackages.map((p) => p.id)));
+          setSelectionAnchor(null);
+        }}
+        visibleCount={visiblePackages.length}
       />
 
       <Toast toast={toast} onDismiss={() => setToast(null)} />
