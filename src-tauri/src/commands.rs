@@ -137,14 +137,32 @@ pub async fn scan_library(
     addon_root: String,
     limit: Option<usize>,
 ) -> Result<scanner::ScanResult, String> {
-    let path = PathBuf::from(&addon_root);
     let db = state.db.clone();
     let thumbs_dir = state.thumbs_dir();
     tauri::async_runtime::spawn_blocking(move || {
         let mut conn = db.lock();
-        index::set_setting(&conn, SETTING_ADDON_ROOT, &addon_root)
-            .map_err(|e| format!("save setting: {e:#}"))?;
-        scanner::scan(&mut conn, &path, &thumbs_dir, limit)
+
+        // Post-setup: ignore the path the frontend passed (which is the
+        // VaM-facing folder full of hardlinks) and scan the managed
+        // library instead. Pre-setup: legacy behavior — scan whatever
+        // the caller gave us and remember it as addon_root for future
+        // calls.
+        let setup_complete = index::get_setting(&conn, crate::setup::SETTING_SETUP_COMPLETE)
+            .map_err(|e| format!("read setup_complete: {e:#}"))?
+            .as_deref()
+            == Some("1");
+        let scan_path: PathBuf = if setup_complete {
+            let managed = index::get_setting(&conn, crate::setup::SETTING_MANAGED_ROOT)
+                .map_err(|e| format!("read managed_root: {e:#}"))?
+                .ok_or_else(|| "managed_root not set despite setup_complete".to_string())?;
+            PathBuf::from(managed)
+        } else {
+            index::set_setting(&conn, SETTING_ADDON_ROOT, &addon_root)
+                .map_err(|e| format!("save setting: {e:#}"))?;
+            PathBuf::from(&addon_root)
+        };
+
+        scanner::scan(&mut conn, &scan_path, &thumbs_dir, limit)
             .map_err(|e| format!("scan failed: {e:#}"))
     })
     .await
@@ -345,13 +363,31 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 #[derive(Debug, Serialize)]
 pub struct Settings {
     pub addon_root: Option<String>,
+    /// Where real .var files live post-setup. The scanner walks this
+    /// when `setup_complete` is true; otherwise it walks `addon_root`.
+    pub managed_root: Option<String>,
+    pub setup_complete: bool,
+    pub setup_completed_at: Option<i64>,
 }
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let conn = state.db.lock();
+    let setup_complete = index::get_setting(&conn, crate::setup::SETTING_SETUP_COMPLETE)
+        .map_err(map_err)?
+        .as_deref()
+        == Some("1");
     Ok(Settings {
         addon_root: index::get_setting(&conn, SETTING_ADDON_ROOT).map_err(map_err)?,
+        managed_root: index::get_setting(&conn, crate::setup::SETTING_MANAGED_ROOT)
+            .map_err(map_err)?,
+        setup_complete,
+        setup_completed_at: index::get_setting(
+            &conn,
+            crate::setup::SETTING_SETUP_COMPLETED_AT,
+        )
+        .map_err(map_err)?
+        .and_then(|v| v.parse::<i64>().ok()),
     })
 }
 
@@ -360,6 +396,57 @@ pub fn set_addon_root(state: State<'_, AppState>, path: String) -> Result<(), St
     let conn = state.db.lock();
     index::set_setting(&conn, SETTING_ADDON_ROOT, &path).map_err(map_err)?;
     Ok(())
+}
+
+// --- Visibility-presets setup wizard ---------------------------------------
+
+#[tauri::command]
+pub fn get_setup_state(
+    state: State<'_, AppState>,
+) -> Result<crate::setup::SetupState, String> {
+    let conn = state.db.lock();
+    crate::setup::get_setup_state(&conn).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn probe_managed_path(
+    state: State<'_, AppState>,
+    managed_path: String,
+) -> Result<crate::setup::ProbeResult, String> {
+    let conn = state.db.lock();
+    crate::setup::probe_managed_path(&conn, &managed_path).map_err(map_err)
+}
+
+/// Run the one-time migration. Long-running on large libraries (though
+/// each file is an O(1) same-volume rename). Frontend should subscribe
+/// to `migration.progress` events for UI updates.
+#[tauri::command]
+pub async fn begin_migration(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    managed_path: String,
+) -> Result<crate::setup::MigrationResult, String> {
+    use crate::setup;
+
+    let db = state.db.clone();
+    let addon_root = {
+        let conn = db.lock();
+        index::get_setting(&conn, SETTING_ADDON_ROOT)
+            .map_err(map_err)?
+            .ok_or_else(|| "addon_root not set; configure the scanner first".to_string())?
+    };
+    let addon = PathBuf::from(addon_root);
+    let managed = PathBuf::from(&managed_path);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db.lock();
+        setup::begin_migration(&mut conn, &addon, &managed, |p| {
+            let _ = app.emit("migration.progress", p);
+        })
+        .map_err(|e| format!("migration failed: {e:#}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 #[tauri::command]

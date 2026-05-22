@@ -47,6 +47,20 @@ quick-xml = "0.36"
 # files on first use to a HF-style cache dir; no per-inference network.
 fastembed = "4"
 
+# Win32 FFI for volume-serial detection. Used by the visibility-presets
+# setup wizard to verify the user's chosen managed library path is on
+# the same NTFS volume as VaM's AddonPackages (required for hardlinks).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+# TempDir for tests that need on-disk fixtures (e.g. setup-migration
+# tests that move real files between two real directories).
+tempfile = "3"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

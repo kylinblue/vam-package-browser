@@ -1,10 +1,12 @@
 mod commands;
 pub mod deps;
 pub mod embedding;
+pub mod fsutil;
 mod hub;
 pub mod index;
 pub mod meta;
 mod scanner;
+pub mod setup;
 pub mod tagging;
 pub mod thumbnails;
 pub mod visibility;
@@ -124,6 +126,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::scan_library,
+            commands::get_setup_state,
+            commands::probe_managed_path,
+            commands::begin_migration,
             commands::query_packages,
             commands::count_packages,
             commands::list_creators,
