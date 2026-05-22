@@ -5,10 +5,13 @@ import { DetailView } from "./components/DetailView";
 import { FacetPanel } from "./components/FacetPanel";
 import { HubSyncView } from "./components/HubSyncView";
 import { PackageGrid } from "./components/PackageGrid";
+import { SetupWizard } from "./components/SetupWizard";
 import { TypeChips } from "./components/TypeChips";
 import {
   countPackages,
   generateThumbnails,
+  getSettings,
+  getSetupState,
   listCreatorsWithCounts,
   listHubCategories,
   listTypeCounts,
@@ -17,7 +20,6 @@ import {
   setAddonRoot,
   setFavorite,
   setHidden,
-  getSettings,
   type CreatorCount,
   type HubCategoryCount,
   type PackageRow,
@@ -107,6 +109,13 @@ export default function App() {
   const [thumbVersions, setThumbVersions] = useState<Record<number, number>>({});
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState("Ready.");
+
+  // Visibility-presets setup wizard. setupComplete drives the button label
+  // ("Set up library management" vs "Library managed ✓"). Mid-flight
+  // migrations auto-open the wizard so the user can resume.
+  const [setupComplete, setSetupComplete] = useState(false);
+  const [managedRoot, setManagedRoot] = useState<string | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
 
   // Batch thumb-progress events so we don't re-render per-image.
   const pendingVersionsRef = useRef<Record<number, number>>({});
@@ -223,14 +232,31 @@ export default function App() {
     }
   }, []);
 
+  const refreshSetupState = useCallback(async () => {
+    try {
+      const s = await getSettings();
+      if (s.addon_root) setAddonRootState(s.addon_root);
+      setSetupComplete(s.setup_complete);
+      setManagedRoot(s.managed_root);
+    } catch {
+      /* pre-scan: settings may not be set */
+    }
+  }, []);
+
   // Bootstrap.
   useEffect(() => {
     (async () => {
+      await refreshSetupState();
+      // If a previous migration was interrupted, surface the wizard
+      // immediately so the user can resume.
       try {
-        const s = await getSettings();
-        if (s.addon_root) setAddonRootState(s.addon_root);
+        const state = await getSetupState();
+        if (state.migration_in_progress) {
+          setWizardOpen(true);
+          setStatusMsg("Previous setup migration was interrupted — resume in wizard.");
+        }
       } catch {
-        /* pre-scan: settings may not be set */
+        /* non-fatal — wizard remains reachable via the button */
       }
       await refreshTypeCountsAndCreators();
     })().catch((e) => setStatusMsg(`init error: ${e}`));
@@ -376,6 +402,17 @@ export default function App() {
                 ? `Thumbs ${thumbProgress.done}/${thumbProgress.total}`
                 : "Thumbs…"
               : "Generate thumbnails"}
+          </button>
+          <button
+            onClick={() => setWizardOpen(true)}
+            disabled={scanning}
+            title={
+              setupComplete
+                ? `Managed library at ${managedRoot ?? "?"}. Re-opening is informational only.`
+                : "Move .var files into a managed library so VaM can be fed a subset."
+            }
+          >
+            {setupComplete ? "Library managed ✓" : "Set up library…"}
           </button>
           <div className="seg-control" role="radiogroup" aria-label="Classification source" style={{ marginLeft: "auto" }}>
             <button
@@ -642,6 +679,15 @@ export default function App() {
         {loading && <span>(loading…)</span>}
         <span style={{ marginLeft: "auto" }}>{statusMsg}</span>
       </div>
+
+      {wizardOpen && (
+        <SetupWizard
+          onClose={() => {
+            setWizardOpen(false);
+            refreshSetupState().catch(() => {});
+          }}
+        />
+      )}
     </div>
   );
 }

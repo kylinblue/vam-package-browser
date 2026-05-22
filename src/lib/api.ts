@@ -268,12 +268,98 @@ export async function revealInFolder(path: string): Promise<void> {
   return invoke("reveal_in_folder", { path });
 }
 
-export async function getSettings(): Promise<{ addon_root: string | null }> {
+export interface Settings {
+  addon_root: string | null;
+  /** Where the real .var files live post-setup. Null pre-setup. */
+  managed_root: string | null;
+  /** True once the one-time visibility-presets setup migration finished. */
+  setup_complete: boolean;
+  /** Unix seconds when setup completed. */
+  setup_completed_at: number | null;
+}
+
+export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }
 
 export async function setAddonRoot(path: string): Promise<void> {
   return invoke("set_addon_root", { path });
+}
+
+// --- Visibility-presets setup wizard ---------------------------------------
+
+export interface SetupState {
+  setup_complete: boolean;
+  addon_root: string | null;
+  managed_root: string | null;
+  managed_volume_id: number | null;
+  setup_completed_at: number | null;
+  /** True when managed_root is set but setup_complete is false AND at least
+   *  one package row already points under managed_root — a previous run was
+   *  interrupted. UI should offer to resume rather than start fresh. */
+  migration_in_progress: boolean;
+}
+
+export interface ProbeCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface ProbeResult {
+  addon_root: string;
+  managed_root: string;
+  /** True iff every check in `checks` passed and begin_migration would proceed. */
+  ok: boolean;
+  /** Per-check status in validation order; first failure is the most likely
+   *  "fix me first" message. */
+  checks: ProbeCheck[];
+  /** First failed check's detail message, hoisted for easy UI binding. */
+  diagnostic: string | null;
+}
+
+export interface MigrationProgress {
+  moved: number;
+  total: number;
+  /** Basename of the current/most-recent file moved in the just-finished batch. */
+  current: string | null;
+}
+
+export interface MigrationError {
+  path: string;
+  reason: string;
+}
+
+export interface MigrationResult {
+  moved: number;
+  /** .var files in addon_root not in the DB at migration time (Hub downloads
+   *  added between scans). Migrated alongside the indexed ones. */
+  leftover_moved: number;
+  errors: MigrationError[];
+  elapsed_ms: number;
+}
+
+/** Current setup state. Read this on app launch to decide whether to show
+ *  the wizard, a resume banner, or normal UI. */
+export async function getSetupState(): Promise<SetupState> {
+  return invoke<SetupState>("get_setup_state");
+}
+
+/** Run every pre-commit validation against a proposed managed path.
+ *  Cheap (no FS writes outside a tiny throwaway hardlink probe). Re-call on
+ *  every path change for live status updates. */
+export async function probeManagedPath(
+  managedPath: string,
+): Promise<ProbeResult> {
+  return invoke<ProbeResult>("probe_managed_path", { managedPath });
+}
+
+/** Execute the one-time migration. Backend emits `migration.progress` events
+ *  during the run; subscribe via @tauri-apps/api/event before calling. */
+export async function beginMigration(
+  managedPath: string,
+): Promise<MigrationResult> {
+  return invoke<MigrationResult>("begin_migration", { managedPath });
 }
 
 export interface ThumbProgress {
