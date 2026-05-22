@@ -91,6 +91,18 @@ export default function App() {
   // filtered out of the visible packages — see toggleSelect's degradation).
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
 
+  // When the user exits select mode, drop everything that was selected.
+  // Keeping the selection around across mode toggles led to "ghost" state —
+  // unticking the toolbar checkbox should feel like a clean exit, not "we
+  // remember your 47 picks in case you come back". They can re-enter the
+  // mode and re-select if needed; the bar reappears as soon as they do.
+  useEffect(() => {
+    if (!selectionMode) {
+      setSelectedIds(new Set());
+      setSelectionAnchor(null);
+    }
+  }, [selectionMode]);
+
   // App-level toast — see components/Toast.tsx for the why-not-local rationale.
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
@@ -647,6 +659,18 @@ export default function App() {
             }
           >
             Clear filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </button>
+          <button
+            type="button"
+            className="toolbar-clear-filters"
+            onClick={() => {
+              loadResults();
+              refreshTypeCountsAndCreators();
+            }}
+            disabled={loading}
+            title="Re-query the grid + chip aggregates. The grid auto-refreshes after every override action; this is a safety net if you ever see stale data."
+          >
+            {loading ? "Refreshing…" : "Refresh"}
           </button>
 
           <label className="toolbar-sort">

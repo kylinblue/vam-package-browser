@@ -143,8 +143,7 @@ export function SelectionActionBar({
       }
       onActionResult({ kind: "ok", text: msg });
       reset();
-      // Don't auto-clear selection — the user might want to apply another
-      // action to the same set. They can click Clear when done.
+      onClear();
     } catch (e) {
       onActionResult({ kind: "error", text: `Pin error: ${e}` });
     } finally {
@@ -192,6 +191,7 @@ export function SelectionActionBar({
       }
       onActionResult({ kind: "ok", text: msg });
       reset();
+      onClear();
     } catch (e) {
       onActionResult({
         kind: "error",
@@ -221,6 +221,7 @@ export function SelectionActionBar({
             }. Auto-sync will keep this override.`;
       onActionResult({ kind: "ok", text: msg });
       reset();
+      onClear();
     } catch (e) {
       onActionResult({ kind: "error", text: `Author error: ${e}` });
     } finally {
