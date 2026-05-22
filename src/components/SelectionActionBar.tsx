@@ -65,8 +65,10 @@ interface Props {
   /** Tell App.tsx to clear the selection (after the user explicitly
    *  clears, or implicitly after a successful bulk action). */
   onClear: () => void;
-  /** Tell App.tsx to re-query the grid so updated hub_* fields show. */
-  onActionApplied: () => void;
+  /** App-level action result sink. Bar forwards every successful or
+   *  failed write here; App shows the toast and (on success) refreshes
+   *  the grid + aggregates. */
+  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
   /** Optional handler for the visibility action. When undefined the
    *  button renders disabled with a tooltip pointing at the future
    *  visibility-preset feature. Wired in by a separate session — see
@@ -74,13 +76,11 @@ interface Props {
   onSetVisibility?: (ids: number[]) => void;
 }
 
-type Feedback = { kind: "ok" | "error"; text: string } | null;
-
 export function SelectionActionBar({
   selection,
   viewMode,
   onClear,
-  onActionApplied,
+  onActionResult,
   onSetVisibility,
 }: Props) {
   const isFetched = viewMode === "fetched";
@@ -98,7 +98,6 @@ export function SelectionActionBar({
   );
   const [authorDraft, setAuthorDraft] = useState("");
   const [busy, setBusy] = useState<"pin" | "classify" | "author" | null>(null);
-  const [feedback, setFeedback] = useState<Feedback>(null);
 
   // Re-seed the draft + close the form on mode flip so the dropdown
   // doesn't carry a stale value from the previous mode's option list.
@@ -118,14 +117,13 @@ export function SelectionActionBar({
   async function handlePin() {
     if (!pinUrl.trim() || busy) return;
     setBusy("pin");
-    setFeedback(null);
     try {
       const report: PinReport = await setHubPin(selection, pinUrl);
       const okCount = report.results.filter((r) => r.status === "ok").length;
       const failCount = report.results.length - okCount;
       if (okCount === 0) {
         const first = report.results[0];
-        setFeedback({
+        onActionResult({
           kind: "error",
           text: `Pin failed for all ${report.results.length} package${
             report.results.length === 1 ? "" : "s"
@@ -143,13 +141,12 @@ export function SelectionActionBar({
       } else {
         msg += " Metadata fills in on the next hub sync.";
       }
-      setFeedback({ kind: "ok", text: msg });
+      onActionResult({ kind: "ok", text: msg });
       reset();
-      onActionApplied();
       // Don't auto-clear selection — the user might want to apply another
       // action to the same set. They can click Clear when done.
     } catch (e) {
-      setFeedback({ kind: "error", text: `Pin error: ${e}` });
+      onActionResult({ kind: "error", text: `Pin error: ${e}` });
     } finally {
       setBusy(null);
     }
@@ -158,7 +155,6 @@ export function SelectionActionBar({
   async function handleClassify() {
     if (!classifyDraft || busy) return;
     setBusy("classify");
-    setFeedback(null);
     try {
       let msg: string;
       if (isFetched) {
@@ -194,11 +190,10 @@ export function SelectionActionBar({
                 direct === 1 ? "" : "s"
               }. Scanner will preserve this on rescan.`;
       }
-      setFeedback({ kind: "ok", text: msg });
+      onActionResult({ kind: "ok", text: msg });
       reset();
-      onActionApplied();
     } catch (e) {
-      setFeedback({
+      onActionResult({
         kind: "error",
         text: `${isFetched ? "Category" : "Type"} override error: ${e}`,
       });
@@ -210,7 +205,6 @@ export function SelectionActionBar({
   async function handleAuthor() {
     if (!authorDraft.trim() || busy) return;
     setBusy("author");
-    setFeedback(null);
     try {
       const report: AuthorReport = await setHubAuthor(selection, authorDraft);
       const direct = report.directly_updated;
@@ -225,11 +219,10 @@ export function SelectionActionBar({
           : `Updated author for ${direct} package${
               direct === 1 ? "" : "s"
             }. Auto-sync will keep this override.`;
-      setFeedback({ kind: "ok", text: msg });
+      onActionResult({ kind: "ok", text: msg });
       reset();
-      onActionApplied();
     } catch (e) {
-      setFeedback({ kind: "error", text: `Author error: ${e}` });
+      onActionResult({ kind: "error", text: `Author error: ${e}` });
     } finally {
       setBusy(null);
     }
@@ -263,7 +256,6 @@ export function SelectionActionBar({
           className={`selection-bar-action ${mode === "pin" ? "active" : ""}`}
           onClick={() => {
             setMode(mode === "pin" ? "closed" : "pin");
-            setFeedback(null);
           }}
           disabled={busy !== null || !canPin}
           title={
@@ -279,7 +271,6 @@ export function SelectionActionBar({
           className={`selection-bar-action ${mode === "classify" ? "active" : ""}`}
           onClick={() => {
             setMode(mode === "classify" ? "closed" : "classify");
-            setFeedback(null);
           }}
           disabled={busy !== null}
           title={
@@ -295,7 +286,6 @@ export function SelectionActionBar({
           className={`selection-bar-action ${mode === "author" ? "active" : ""}`}
           onClick={() => {
             setMode(mode === "author" ? "closed" : "author");
-            setFeedback(null);
           }}
           disabled={busy !== null}
           title="Override the hub_author for selected packages. Propagates to every other package by the same creator(s) and protects against auto-sync overwrites."
@@ -320,7 +310,6 @@ export function SelectionActionBar({
           className="selection-bar-action selection-bar-clear"
           onClick={() => {
             reset();
-            setFeedback(null);
             onClear();
           }}
           disabled={busy !== null}
@@ -428,11 +417,6 @@ export function SelectionActionBar({
         </div>
       )}
 
-      {feedback && (
-        <div className={`selection-bar-feedback selection-bar-feedback-${feedback.kind}`}>
-          {feedback.text}
-        </div>
-      )}
     </div>
   );
 }

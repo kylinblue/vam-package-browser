@@ -7,6 +7,7 @@ import { HubSyncView } from "./components/HubSyncView";
 import { PackageGrid } from "./components/PackageGrid";
 import { SelectionActionBar } from "./components/SelectionActionBar";
 import { StatsPanel } from "./components/StatsPanel";
+import { Toast, type ToastMessage } from "./components/Toast";
 import { TypeChips } from "./components/TypeChips";
 import {
   countPackages,
@@ -89,6 +90,9 @@ export default function App() {
   // to the next target. Null when no anchor has been set yet (or it's been
   // filtered out of the visible packages — see toggleSelect's degradation).
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
+
+  // App-level toast — see components/Toast.tsx for the why-not-local rationale.
+  const [toast, setToast] = useState<ToastMessage | null>(null);
 
   // Size + date range filter inputs are kept as raw strings; empty = no bound.
   const [minSizeMb, setMinSizeMb] = useState("");
@@ -361,6 +365,21 @@ export default function App() {
       console.error("refresh aggregates:", e);
     }
   }, []);
+
+  // Single entry point children call after every action attempt. App
+  // shows the toast and — on success — kicks off a fresh grid query +
+  // aggregate refresh so any chip counts and tile data update live. No
+  // child needs to know about loadResults / aggregate refresh anymore.
+  const handleActionResult = useCallback(
+    (msg: ToastMessage) => {
+      setToast(msg);
+      if (msg.kind === "ok") {
+        loadResults();
+        refreshTypeCountsAndCreators();
+      }
+    },
+    [loadResults, refreshTypeCountsAndCreators],
+  );
 
   // Bootstrap.
   useEffect(() => {
@@ -820,6 +839,7 @@ export default function App() {
             setDetailPackageId(null);
           }}
           onOpenPackage={setDetailPackageId}
+          onActionResult={handleActionResult}
         />
       )}
 
@@ -831,15 +851,11 @@ export default function App() {
             setSelectedIds(new Set());
             setSelectionAnchor(null);
           }}
-          onActionApplied={() => {
-            // Pull a fresh result set + aggregates after the backend
-            // applied a bulk action. Selection is left intact so the user
-            // can stack further actions on the same set if they want.
-            loadResults();
-            refreshTypeCountsAndCreators();
-          }}
+          onActionResult={handleActionResult}
         />
       )}
+
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
 
       <div className="statusbar">
         <span>{headerCount}</span>

@@ -78,6 +78,53 @@ html, body, #root {
   cursor: pointer;
   white-space: nowrap;
 }
+
+/* App-level toast — lives at the app root so it survives child
+   component unmounts (DetailView blanking out during a refetch, etc). */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1000;
+  max-width: 480px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  border-left: 3px solid;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  animation: toast-in 180ms ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.toast-ok {
+  border-left-color: rgba(140, 210, 160, 0.85);
+}
+.toast-error {
+  border-left-color: rgba(235, 140, 120, 0.85);
+}
+.toast-text {
+  flex: 1 1 auto;
+}
+.toast-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.toast-dismiss:hover {
+  color: var(--fg);
+}
 .toolbar-clear-filters:hover:not(:disabled) {
   color: var(--fg);
   border-color: var(--accent);

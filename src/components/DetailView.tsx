@@ -54,6 +54,10 @@ interface Props {
   /** Open another package's detail view without dismissing this modal. Used
    *  by the dependency sidebar to navigate between related packages. */
   onOpenPackage: (id: number) => void;
+  /** App-level action result sink. DetailView forwards every successful
+   *  or failed override / pin / category / author write here; App shows
+   *  the toast and (on success) refreshes the grid + aggregates. */
+  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
 }
 
 function formatSize(bytes: number): string {
@@ -87,6 +91,7 @@ export function DetailView({
   onFilterByAuthor,
   onFilterByType,
   onOpenPackage: _onOpenPackage,
+  onActionResult,
 }: Props) {
   const [detail, setDetail] = useState<PackageDetail | null>(null);
   const [relationships, setRelationships] =
@@ -126,13 +131,23 @@ export function DetailView({
 
   const previewImage = hoveredImage ?? selectedImage;
 
+  // Track the last currentId we fetched so we can distinguish "user
+  // navigated to a different package" (need to blank the panel — old
+  // package's image / metadata is irrelevant) from "same package, just a
+  // post-action refetch" (keep showing the old data; it'll be replaced
+  // atomically when the new fetch returns).
+  const lastFetchedIdRef = useRef<number | null>(null);
+
   useEffect(() => {
     let cancelled = false;
-    setDetail(null);
-    setRelationships(null);
+    if (lastFetchedIdRef.current !== currentId) {
+      setDetail(null);
+      setRelationships(null);
+      setSelectedImage(null);
+      setHoveredImage(null);
+    }
     setError(null);
-    setSelectedImage(null);
-    setHoveredImage(null);
+    lastFetchedIdRef.current = currentId;
     (async () => {
       try {
         // Fire detail + relationships in parallel — relationships is cheap
@@ -292,6 +307,7 @@ export function DetailView({
                   pkg={pkg}
                   viewMode={viewMode}
                   onReload={() => setReloadCounter((c) => c + 1)}
+                  onActionResult={onActionResult}
                 />
 
                 {viewMode === "tagged" && tags.length > 0 && (
@@ -413,10 +429,12 @@ function HubInfoSection({
   pkg,
   viewMode,
   onReload,
+  onActionResult,
 }: {
   pkg: PackageRow;
   viewMode: "simple" | "tagged" | "fetched";
   onReload: () => void;
+  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
 }) {
   const isFetched = viewMode === "fetched";
   const isMatched = pkg.hub_resource_id != null;
@@ -444,13 +462,11 @@ function HubInfoSection({
 
   // Inline action state. Kept local to the section so reopening DetailView
   // resets everything cleanly (the section unmounts with the modal).
+  // Feedback no longer lives here — it bubbles up to App.tsx's Toast so
+  // it survives the post-action refetch that briefly unmounts this section.
   const [showPin, setShowPin] = useState(false);
   const [pinUrl, setPinUrl] = useState("");
   const [busy, setBusy] = useState<"pin" | "classify" | "author" | null>(null);
-  const [feedback, setFeedback] = useState<{
-    kind: "ok" | "error";
-    text: string;
-  } | null>(null);
   const [showClassify, setShowClassify] = useState(false);
   const [classifyDraft, setClassifyDraft] = useState<string>(classifyCurrent);
   const [showAuthor, setShowAuthor] = useState(false);
@@ -468,12 +484,11 @@ function HubInfoSection({
   async function handlePin() {
     if (!pinUrl.trim() || busy) return;
     setBusy("pin");
-    setFeedback(null);
     try {
       const report = await setHubPin([pkg.id], pinUrl);
       if (!report.any_succeeded) {
         const r = report.results[0];
-        setFeedback({
+        onActionResult({
           kind: "error",
           text: `Pin failed: ${r?.status ?? "unknown"}${r?.detail ? ` — ${r.detail}` : ""}`,
         });
@@ -482,7 +497,6 @@ function HubInfoSection({
       const r = report.results[0];
       const sib = report.siblings_updated;
       const auth = report.authors_updated;
-      // Toast wording avoids "propagation" jargon per the agreed copy.
       let msg = r.method === "override" ? "Overrode hub pin." : "Linked to hub.";
       if (sib + auth > 0) {
         msg += ` The match will be applied to ${sib + auth} related row${
@@ -491,12 +505,12 @@ function HubInfoSection({
       } else {
         msg += " Metadata fills in on the next hub sync.";
       }
-      setFeedback({ kind: "ok", text: msg });
+      onActionResult({ kind: "ok", text: msg });
       setShowPin(false);
       setPinUrl("");
       onReload();
     } catch (e) {
-      setFeedback({ kind: "error", text: `Pin error: ${e}` });
+      onActionResult({ kind: "error", text: `Pin error: ${e}` });
     } finally {
       setBusy(null);
     }
@@ -505,7 +519,6 @@ function HubInfoSection({
   async function handleClassify() {
     if (!classifyDraft || busy) return;
     setBusy("classify");
-    setFeedback(null);
     try {
       let msg: string;
       if (isFetched) {
@@ -530,11 +543,11 @@ function HubInfoSection({
               } updated. Scanner will preserve this on rescan.`
             : `Set type to ${classifyDraft}. Scanner will preserve this on rescan.`;
       }
-      setFeedback({ kind: "ok", text: msg });
+      onActionResult({ kind: "ok", text: msg });
       setShowClassify(false);
       onReload();
     } catch (e) {
-      setFeedback({
+      onActionResult({
         kind: "error",
         text: `${isFetched ? "Category" : "Type"} override error: ${e}`,
       });
@@ -546,7 +559,6 @@ function HubInfoSection({
   async function handleAuthor() {
     if (!authorDraft.trim() || busy) return;
     setBusy("author");
-    setFeedback(null);
     try {
       const report = await setHubAuthor([pkg.id], authorDraft);
       const others = report.authors_updated;
@@ -556,11 +568,11 @@ function HubInfoSection({
               others === 1 ? "" : "s"
             } by ${pkg.creator || "this creator"} picked up the same override. Auto-sync will keep it.`
           : "Updated author. Auto-sync will keep this override.";
-      setFeedback({ kind: "ok", text: msg });
+      onActionResult({ kind: "ok", text: msg });
       setShowAuthor(false);
       onReload();
     } catch (e) {
-      setFeedback({ kind: "error", text: `Author error: ${e}` });
+      onActionResult({ kind: "error", text: `Author error: ${e}` });
     } finally {
       setBusy(null);
     }
@@ -636,7 +648,6 @@ function HubInfoSection({
               setShowPin((v) => !v);
               setShowClassify(false);
               setShowAuthor(false);
-              setFeedback(null);
             }}
           >
             {isMatched ? "Pin to different URL…" : "Pin to hub URL…"}
@@ -649,7 +660,6 @@ function HubInfoSection({
             setShowClassify((v) => !v);
             setShowPin(false);
             setShowAuthor(false);
-            setFeedback(null);
           }}
           title={
             isFetched
@@ -666,7 +676,6 @@ function HubInfoSection({
             setShowAuthor((v) => !v);
             setShowPin(false);
             setShowClassify(false);
-            setFeedback(null);
           }}
           title={`Set the canonical hub author for ${pkg.creator || "this creator"}. Propagates to every other package by the same creator and is protected from auto-sync overwrites.`}
         >
@@ -775,11 +784,6 @@ function HubInfoSection({
         </div>
       )}
 
-      {feedback && (
-        <div className={`detail-hub-feedback detail-hub-feedback-${feedback.kind}`}>
-          {feedback.text}
-        </div>
-      )}
     </section>
   );
 }
