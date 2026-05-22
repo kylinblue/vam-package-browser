@@ -4,9 +4,11 @@ import {
   beginMigration,
   getSetupState,
   probeManagedPath,
+  revertSetup,
   type MigrationProgress,
   type MigrationResult,
   type ProbeResult,
+  type RevertResult,
   type SetupState,
 } from "../lib/api";
 
@@ -20,8 +22,11 @@ type Phase =
   | { kind: "loading" }
   | { kind: "configuring"; state: SetupState }
   | { kind: "resume_prompt"; state: SetupState }
+  | { kind: "complete_prompt"; state: SetupState }
   | { kind: "migrating"; progress: MigrationProgress | null }
+  | { kind: "reverting"; progress: MigrationProgress | null; state: SetupState }
   | { kind: "done"; result: MigrationResult }
+  | { kind: "reverted"; result: RevertResult }
   | { kind: "error"; message: string };
 
 /** Default suggested managed-folder name. Sits as a sibling of the user's
@@ -50,11 +55,7 @@ export function SetupWizard({ onClose }: Props) {
       try {
         const state = await getSetupState();
         if (state.setup_complete) {
-          setPhase({
-            kind: "error",
-            message:
-              "Setup is already complete. Close this window to return to the app.",
-          });
+          setPhase({ kind: "complete_prompt", state });
           return;
         }
         if (state.migration_in_progress && state.managed_root) {
@@ -103,13 +104,23 @@ export function SetupWizard({ onClose }: Props) {
     };
   }, [managedPath, phase.kind]);
 
-  // Subscribe to migration.progress events when migrating.
+  // Subscribe to migration.progress events when migrating OR reverting.
+  // Backend emits the same event from both code paths so one subscription
+  // covers both phases.
   useEffect(() => {
-    if (phase.kind !== "migrating") return;
+    if (phase.kind !== "migrating" && phase.kind !== "reverting") return;
     let unlisten: UnlistenFn | undefined;
     (async () => {
       unlisten = await listen<MigrationProgress>("migration.progress", (e) => {
-        setPhase({ kind: "migrating", progress: e.payload });
+        setPhase((prev) => {
+          if (prev.kind === "migrating") {
+            return { kind: "migrating", progress: e.payload };
+          }
+          if (prev.kind === "reverting") {
+            return { ...prev, progress: e.payload };
+          }
+          return prev;
+        });
       });
     })();
     return () => {
@@ -126,6 +137,16 @@ export function SetupWizard({ onClose }: Props) {
       setPhase({ kind: "error", message: `${e}` });
     }
   }, [managedPath]);
+
+  const startRevert = useCallback(async (state: SetupState) => {
+    setPhase({ kind: "reverting", progress: null, state });
+    try {
+      const result = await revertSetup();
+      setPhase({ kind: "reverted", result });
+    } catch (e) {
+      setPhase({ kind: "error", message: `Revert failed: ${e}` });
+    }
+  }, []);
 
   const canStart = useMemo(() => {
     return (
@@ -159,20 +180,76 @@ export function SetupWizard({ onClose }: Props) {
         {phase.kind === "resume_prompt" && (
           <>
             <p>
-              A previous migration was interrupted. Some files have already
-              been moved to the managed folder; some remain in AddonPackages.
-              Resuming will finish the move.
+              A previous migration was interrupted. Some files may have
+              been moved to the managed folder; some may remain in
+              AddonPackages.
             </p>
             <p style={{ color: "var(--fg-dim)", margin: "8px 0" }}>
               <strong>Managed folder:</strong>{" "}
               <code>{phase.state.managed_root}</code>
             </p>
+            <p>
+              Choose how to proceed:
+            </p>
+            <ul style={{ color: "var(--fg-dim)", paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
+              <li>
+                <strong>Resume migration</strong> — finish moving any
+                remaining files. Best if the previous run just got
+                interrupted (closed window, crash).
+              </li>
+              <li>
+                <strong>Revert migration</strong> — move every file
+                back from the managed folder to AddonPackages, clear
+                the setup state. Best if the previous run hit an error
+                you want to back out of, or you want to start over
+                cleanly.
+              </li>
+            </ul>
             <div style={buttonRowStyle}>
               <button style={secondaryButtonStyle} onClick={onClose}>
                 Cancel
               </button>
+              <button
+                style={dangerButtonStyle}
+                onClick={() => startRevert(phase.state)}
+              >
+                ◀ Revert migration
+              </button>
               <button style={primaryButtonStyle} onClick={startMigration}>
                 Resume migration ▶
+              </button>
+            </div>
+          </>
+        )}
+
+        {phase.kind === "complete_prompt" && (
+          <>
+            <p>Setup is already complete.</p>
+            <p style={{ color: "var(--fg-dim)", margin: "8px 0" }}>
+              <strong>Managed library:</strong>{" "}
+              <code>{phase.state.managed_root}</code>
+            </p>
+            <p style={warnBoxStyle}>
+              ⚠ Reverting will move every <code>.var</code> file (and
+              directory) from the managed library back into your
+              AddonPackages folder, remove any currently-loaded
+              hardlinks/junctions, and reset the setup state. VaM will
+              see the full library again on its next launch. Subfolder
+              structure from the managed library is preserved.
+            </p>
+            <p style={{ color: "var(--fg-dim)", fontSize: 12 }}>
+              Same-volume rename is fast — this finishes in seconds
+              even for thousands of files.
+            </p>
+            <div style={buttonRowStyle}>
+              <button style={secondaryButtonStyle} onClick={onClose}>
+                Close
+              </button>
+              <button
+                style={dangerButtonStyle}
+                onClick={() => startRevert(phase.state)}
+              >
+                ◀ Revert setup
               </button>
             </div>
           </>
@@ -196,11 +273,19 @@ export function SetupWizard({ onClose }: Props) {
         )}
 
         {phase.kind === "migrating" && (
-          <MigratingView progress={phase.progress} />
+          <MigratingView progress={phase.progress} verb="Hardlinking" />
+        )}
+
+        {phase.kind === "reverting" && (
+          <MigratingView progress={phase.progress} verb="Reverting" />
         )}
 
         {phase.kind === "done" && (
           <DoneView result={phase.result} onClose={onClose} />
+        )}
+
+        {phase.kind === "reverted" && (
+          <RevertedView result={phase.result} onClose={onClose} />
         )}
       </div>
     </div>
@@ -366,13 +451,21 @@ function labelForCheck(name: string): string {
   }
 }
 
-function MigratingView({ progress }: { progress: MigrationProgress | null }) {
+function MigratingView({
+  progress,
+  verb,
+}: {
+  progress: MigrationProgress | null;
+  verb: "Hardlinking" | "Reverting";
+}) {
   const moved = progress?.moved ?? 0;
   const total = progress?.total ?? 0;
   const pct = total > 0 ? Math.min(100, Math.round((moved * 100) / total)) : 0;
+  const heading =
+    verb === "Reverting" ? "Reverting setup…" : "Migrating package library…";
   return (
     <>
-      <p>Migrating package library…</p>
+      <p>{heading}</p>
       <div style={progressOuterStyle}>
         <div
           style={{
@@ -396,6 +489,71 @@ function MigratingView({ progress }: { progress: MigrationProgress | null }) {
         Same-volume renames are O(1) per file; this usually finishes within
         seconds even on large libraries.
       </p>
+    </>
+  );
+}
+
+function RevertedView({
+  result,
+  onClose,
+}: {
+  result: RevertResult;
+  onClose: () => void;
+}) {
+  const sec = Math.max(1, Math.round(result.elapsed_ms / 1000));
+  return (
+    <>
+      <p style={{ color: "#3fb950", fontWeight: 600 }}>✓ Revert complete</p>
+      <ul style={{ color: "var(--fg-dim)", paddingLeft: 18 }}>
+        <li>
+          {result.moved.toLocaleString()} package
+          {result.moved === 1 ? "" : "s"} moved back to AddonPackages
+        </li>
+        {result.active_cleared > 0 && (
+          <li>
+            {result.active_cleared.toLocaleString()} active-folder
+            entr{result.active_cleared === 1 ? "y" : "ies"} unlinked
+          </li>
+        )}
+        {result.orphans_pruned > 0 && (
+          <li>
+            {result.orphans_pruned.toLocaleString()} stale package row
+            {result.orphans_pruned === 1 ? "" : "s"} pruned (file no
+            longer exists)
+          </li>
+        )}
+        <li>elapsed {sec.toLocaleString()} s</li>
+        {result.errors.length > 0 && (
+          <li style={{ color: "#f85149" }}>
+            {result.errors.length} per-file error
+            {result.errors.length === 1 ? "" : "s"} (see details)
+          </li>
+        )}
+      </ul>
+      {result.errors.length > 0 && (
+        <details style={{ margin: "8px 0", color: "var(--fg-dim)" }}>
+          <summary>Error details</summary>
+          <ul style={{ paddingLeft: 18, marginTop: 4 }}>
+            {result.errors.slice(0, 20).map((err, i) => (
+              <li key={i}>
+                <code>{err.path}</code> — {err.reason}
+              </li>
+            ))}
+            {result.errors.length > 20 && (
+              <li>… and {result.errors.length - 20} more</li>
+            )}
+          </ul>
+        </details>
+      )}
+      <p>
+        Setup state cleared. Run <em>Scan all</em> to re-index, then
+        the wizard if you want to set up again.
+      </p>
+      <div style={buttonRowStyle}>
+        <button style={primaryButtonStyle} onClick={onClose}>
+          Done
+        </button>
+      </div>
     </>
   );
 }
@@ -555,6 +713,26 @@ const secondaryButtonStyle: React.CSSProperties = {
   padding: "8px 16px",
   borderRadius: 4,
   cursor: "pointer",
+};
+
+const dangerButtonStyle: React.CSSProperties = {
+  background: "rgba(248, 81, 73, 0.15)",
+  color: "#f85149",
+  border: "1px solid rgba(248, 81, 73, 0.5)",
+  padding: "8px 16px",
+  borderRadius: 4,
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const warnBoxStyle: React.CSSProperties = {
+  background: "rgba(248, 81, 73, 0.08)",
+  border: "1px solid rgba(248, 81, 73, 0.3)",
+  borderRadius: 4,
+  padding: "10px 12px",
+  margin: "12px 0",
+  fontSize: 13,
+  lineHeight: 1.5,
 };
 
 const errorTextStyle: React.CSSProperties = {

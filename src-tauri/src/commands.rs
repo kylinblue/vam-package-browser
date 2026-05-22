@@ -470,6 +470,50 @@ pub async fn begin_migration(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Undo a setup migration cleanly via the in-app path (no SQLite editing
+/// required). Unloads the active folder, moves every entry back from
+/// managed_root → addon_root preserving relative path, prunes orphan
+/// packages rows, and resets the setup-related settings. Emits the
+/// existing `migration.progress` events so the wizard can reuse the
+/// same progress UI.
+#[tauri::command]
+pub async fn revert_setup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::setup::RevertResult, String> {
+    use crate::setup;
+
+    let db = state.db.clone();
+    let (addon_root, managed_root) = {
+        let conn = db.lock();
+        let addon = index::get_setting(&conn, SETTING_ADDON_ROOT)
+            .map_err(map_err)?
+            .ok_or_else(|| "addon_root not set".to_string())?;
+        let managed = index::get_setting(&conn, setup::SETTING_MANAGED_ROOT)
+            .map_err(map_err)?
+            .unwrap_or_default();
+        (addon, managed)
+    };
+    if managed_root.is_empty() {
+        return Err(
+            "Nothing to revert: managed_root is not set. Run setup first to have something to revert from."
+                .to_string(),
+        );
+    }
+    let addon = PathBuf::from(addon_root);
+    let managed = PathBuf::from(managed_root);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db.lock();
+        setup::revert_setup(&mut conn, &addon, &managed, |p| {
+            let _ = app.emit("migration.progress", p);
+        })
+        .map_err(|e| format!("revert failed: {e:#}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 // --- Visibility-presets load / unload --------------------------------------
 
 /// Reconcile the active folder to be exactly equal to closure(seeds).

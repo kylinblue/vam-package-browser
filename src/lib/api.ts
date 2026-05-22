@@ -374,6 +374,26 @@ export async function beginMigration(
   return invoke<MigrationResult>("begin_migration", { managedPath });
 }
 
+export interface RevertResult {
+  /** .var entries moved back from managed_root to addon_root. */
+  moved: number;
+  /** active_folder_state entries cleared (hardlinks unlinked / junctions removed). */
+  active_cleared: number;
+  /** Stale packages rows pruned because their var_path no longer
+   *  resolves to anything on disk. */
+  orphans_pruned: number;
+  errors: MigrationError[];
+  elapsed_ms: number;
+}
+
+/** Undo a setup migration cleanly. Unloads the active folder, moves
+ *  every entry back from managed_root → addon_root preserving relative
+ *  path, prunes orphan packages rows, and resets setup settings. Same
+ *  `migration.progress` event stream as forward migration. */
+export async function revertSetup(): Promise<RevertResult> {
+  return invoke<RevertResult>("revert_setup");
+}
+
 // --- Visibility-presets load / unload --------------------------------------
 
 /** What the user wants visible — author seeds + explicit package ids.

@@ -92,6 +92,26 @@ pub struct MigrationError {
     pub reason: String,
 }
 
+/// Outcome of `revert_setup`. Symmetric to `MigrationResult` but
+/// surfaces what got cleared from the active folder as well as what
+/// got moved back to addon_root.
+#[derive(Debug, Clone, Serialize)]
+pub struct RevertResult {
+    /// `.var` entries (files + directories) moved from managed_root
+    /// back to addon_root.
+    pub moved: i64,
+    /// active_folder_state entries cleared (hardlinks unlinked /
+    /// junctions removed). Pre-revert these were "loaded" into the
+    /// VaM-facing folder; reverting removes them so the move-back
+    /// step has a clean destination.
+    pub active_cleared: i64,
+    /// Stale `packages` rows removed because their `var_path` no
+    /// longer resolves to anything on disk after the revert.
+    pub orphans_pruned: i64,
+    pub errors: Vec<MigrationError>,
+    pub elapsed_ms: u128,
+}
+
 // --- public API -------------------------------------------------------------
 
 /// Read the current setup state from the DB. Detects mid-flight
@@ -568,6 +588,301 @@ pub fn begin_migration(
     })
 }
 
+/// Undo a setup migration: clear any hardlinks/junctions we placed,
+/// move every entry from `managed_root` back to `addon_root` preserving
+/// relative path, update `packages.var_path` rows to point at the
+/// addon-side locations again, prune orphan rows whose files no longer
+/// exist, and clear the setup-related settings so the wizard treats
+/// the app as fresh.
+///
+/// Works in both states:
+/// - Mid-flight (setup_complete = 0, partial files in managed_root):
+///   moves whatever's there back; safe even if nothing was moved yet.
+/// - Completed (setup_complete = 1, active folder populated): unloads
+///   the active folder first, then moves managed_root back, then
+///   resets settings.
+///
+/// Per-file idempotent. Re-runnable after a crash mid-revert.
+pub fn revert_setup(
+    conn: &mut Connection,
+    addon_root: &Path,
+    managed_root: &Path,
+    mut on_progress: impl FnMut(&MigrationProgress),
+) -> Result<RevertResult> {
+    use crate::index::set_setting;
+    use walkdir::WalkDir;
+
+    let start = Instant::now();
+    let mut errors: Vec<MigrationError> = Vec::new();
+
+    // --- step 1: unload the active folder ---------------------------------
+    // Iterate `active_folder_state` directly (not the public materialize::
+    // unload_all, which refuses pre-setup). For each row, remove the
+    // hardlink/junction (idempotent on NotFound) and drop the row. We
+    // can't reuse materialize::unlink_one without circular dependency
+    // and it's small enough to duplicate here.
+    let active_rows: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT package_id, active_path FROM active_folder_state")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut active_cleared: i64 = 0;
+    if !active_rows.is_empty() {
+        let tx = conn.transaction()?;
+        {
+            let mut del = tx.prepare("DELETE FROM active_folder_state WHERE package_id = ?1")?;
+            for (id, active_path) in &active_rows {
+                match remove_link_at(Path::new(active_path)) {
+                    Ok(()) => {
+                        del.execute(params![id])?;
+                        active_cleared += 1;
+                    }
+                    Err(e) => errors.push(MigrationError {
+                        path: active_path.clone(),
+                        reason: format!("unlink: {e}"),
+                    }),
+                }
+            }
+        }
+        tx.commit()?;
+    }
+
+    // --- step 2: move everything from managed_root back to addon_root -----
+    // Walk managed_root for `.var` entries (files + dirs). Same
+    // skip-current-dir trick the scanner uses so we don't descend into a
+    // dir package's payload.
+    let mut moved: i64 = 0;
+    if managed_root.exists() {
+        // First pass: collect the work list so we can report total/progress.
+        let mut to_revert: Vec<(PathBuf, std::fs::FileType)> = Vec::new();
+        let mut it = WalkDir::new(managed_root).into_iter();
+        while let Some(entry) = it.next() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let ext_ok = entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("var"))
+                .unwrap_or(false);
+            if !ext_ok {
+                continue;
+            }
+            let ft = entry.file_type();
+            if !(ft.is_file() || ft.is_dir()) {
+                continue;
+            }
+            to_revert.push((entry.path().to_path_buf(), ft));
+            if ft.is_dir() {
+                it.skip_current_dir();
+            }
+        }
+
+        let total = to_revert.len() as i64;
+        let batch_size: usize = 500;
+        for chunk in to_revert.chunks(batch_size) {
+            let tx = conn.transaction()?;
+            {
+                let mut upd = tx.prepare_cached(
+                    "UPDATE packages SET var_path = ?1 WHERE var_path = ?2",
+                )?;
+                for (managed_entry, _ft) in chunk {
+                    let rel = relative_under_managed_root(managed_entry, managed_root);
+                    if rel.as_os_str().is_empty() {
+                        errors.push(MigrationError {
+                            path: managed_entry.to_string_lossy().to_string(),
+                            reason: "could not derive relative path under managed_root"
+                                .into(),
+                        });
+                        continue;
+                    }
+                    let dest = addon_root.join(&rel);
+
+                    // Refuse to overwrite existing content in addon_root —
+                    // it isn't ours.
+                    if dest.exists() {
+                        errors.push(MigrationError {
+                            path: managed_entry.to_string_lossy().to_string(),
+                            reason: format!(
+                                "destination occupied: {} already exists",
+                                dest.display()
+                            ),
+                        });
+                        continue;
+                    }
+
+                    // Recreate the parent dir tree under addon_root.
+                    if let Some(parent) = dest.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            errors.push(MigrationError {
+                                path: managed_entry.to_string_lossy().to_string(),
+                                reason: format!(
+                                    "create_dir_all({}): {e}",
+                                    parent.display()
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+
+                    if let Err(e) = std::fs::rename(managed_entry, &dest) {
+                        errors.push(MigrationError {
+                            path: managed_entry.to_string_lossy().to_string(),
+                            reason: format!("rename: {e}"),
+                        });
+                        continue;
+                    }
+
+                    // Update packages.var_path: rows pointing at this
+                    // managed-side entry now point at the addon-side dest.
+                    let old_str = managed_entry.to_string_lossy().to_string();
+                    let new_str = dest.to_string_lossy().to_string();
+                    upd.execute(params![new_str, old_str])?;
+                    moved += 1;
+                }
+            }
+            tx.commit()?;
+            on_progress(&MigrationProgress {
+                moved,
+                total,
+                current: chunk
+                    .last()
+                    .map(|(p, _)| {
+                        p.file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                    })
+                    .flatten(),
+            });
+        }
+    }
+
+    // --- step 3: prune orphan packages rows -------------------------------
+    // After revert, any row whose var_path doesn't resolve to an existing
+    // file/dir is orphaned (stale from earlier scans, or a casualty of
+    // the previously-buggy migration). Drop them so the next scan rebuilds
+    // cleanly. Family-level data + tagging / hub catalog stay intact
+    // (those are keyed by family_id, not package_id; family rows
+    // survive a packages-row delete).
+    let stale_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id, var_path FROM packages")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .filter(|(_, p)| !p.is_empty() && !Path::new(p).exists())
+            .map(|(id, _)| id)
+            .collect()
+    };
+    let mut orphans_pruned: i64 = 0;
+    if !stale_ids.is_empty() {
+        let tx = conn.transaction()?;
+        {
+            let mut del = tx.prepare("DELETE FROM packages WHERE id = ?1")?;
+            for id in &stale_ids {
+                del.execute(params![id])?;
+                orphans_pruned += 1;
+            }
+        }
+        tx.commit()?;
+    }
+
+    // --- step 4: best-effort cleanup of empty managed dir tree -----------
+    // After everything migrated back, managed_root should be empty.
+    // Tear it down so a future setup attempt sees a clean slate.
+    let _ = remove_empty_dirs_recursive(managed_root);
+
+    // --- step 5: clear setup settings -----------------------------------
+    for key in [
+        SETTING_MANAGED_ROOT,
+        SETTING_MANAGED_VOLUME_ID,
+        SETTING_SETUP_COMPLETE,
+        SETTING_SETUP_COMPLETED_AT,
+    ] {
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+    }
+    // `set_setting` is unused on this code path (we only DELETE here),
+    // but keep the import alive for future use.
+    let _ = &set_setting;
+
+    Ok(RevertResult {
+        moved,
+        active_cleared,
+        orphans_pruned,
+        errors,
+        elapsed_ms: start.elapsed().as_millis(),
+    })
+}
+
+/// Strip `managed_root` from `child` case-insensitively, returning the
+/// remainder in original case.
+fn relative_under_managed_root(child: &Path, managed_root: &Path) -> PathBuf {
+    let norm_lower = |p: &Path| -> String {
+        p.to_string_lossy().replace('/', "\\").to_lowercase()
+    };
+    let child_norm_lower = norm_lower(child);
+    let mut root_norm_lower = norm_lower(managed_root);
+    if !root_norm_lower.ends_with('\\') {
+        root_norm_lower.push('\\');
+    }
+    if child_norm_lower.starts_with(&root_norm_lower) {
+        let child_norm_orig = child.to_string_lossy().replace('/', "\\");
+        return PathBuf::from(&child_norm_orig[root_norm_lower.len()..]);
+    }
+    child.file_name().map(PathBuf::from).unwrap_or_default()
+}
+
+/// Remove the file or junction at `path`. Junctions on Windows show as
+/// symlink_dir via symlink_metadata; remove_dir clears the reparse
+/// point without touching the target. Idempotent on NotFound.
+fn remove_link_at(path: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    use std::os::windows::fs::FileTypeExt;
+    let md = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(anyhow!("symlink_metadata: {e}")),
+    };
+    let ft = md.file_type();
+    #[cfg(target_os = "windows")]
+    let dir_like = ft.is_dir() || ft.is_symlink_dir();
+    #[cfg(not(target_os = "windows"))]
+    let dir_like = ft.is_dir();
+    let result = if dir_like {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow!("remove: {e}")),
+    }
+}
+
+/// Depth-first walk that removes empty directories. Stops at the first
+/// non-empty dir on each branch. Used post-revert to clean up the
+/// managed_root tree without touching anything we don't own.
+fn remove_empty_dirs_recursive(root: &Path) -> std::io::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(root)?.filter_map(|e| e.ok()).collect();
+    for entry in entries.drain(..) {
+        let p = entry.path();
+        if p.is_dir() {
+            let _ = remove_empty_dirs_recursive(&p);
+        }
+    }
+    // Try to remove this dir. Fails (silently) if it still has content.
+    let _ = std::fs::remove_dir(root);
+    Ok(())
+}
+
 // --- internals --------------------------------------------------------------
 
 fn count_packages_under(conn: &Connection, root: &str) -> Result<i64> {
@@ -776,6 +1091,11 @@ mod tests {
                 package_name TEXT NOT NULL DEFAULT '',
                 version      TEXT NOT NULL DEFAULT '',
                 is_hidden    INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE active_folder_state (
+                package_id      INTEGER PRIMARY KEY,
+                active_path     TEXT NOT NULL,
+                materialized_at INTEGER NOT NULL
              );",
         )
         .unwrap();
@@ -1060,6 +1380,148 @@ mod tests {
         assert!(new_dir.is_dir());
         assert!(new_dir.join("meta.json").exists());
         assert!(!addon.join("DirAuthor.Pkg.1.var").exists());
+    }
+
+    #[test]
+    fn revert_after_clean_migration_moves_everything_back() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_var(&addon, &conn, "Author.Foo.1.var");
+        add_var(&addon, &conn, "Author.Bar.1.var");
+
+        // Forward migration first.
+        begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert!(managed.join("Author.Foo.1.var").exists());
+        assert!(!addon.join("Author.Foo.1.var").exists());
+
+        // Now revert.
+        let res = revert_setup(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 2);
+        assert_eq!(res.errors.len(), 0);
+        assert_eq!(res.active_cleared, 0);
+
+        // Files back in addon.
+        assert!(addon.join("Author.Foo.1.var").exists());
+        assert!(addon.join("Author.Bar.1.var").exists());
+        // Managed empty (and removed entirely if no other files).
+        assert!(!managed.exists() || managed.read_dir().unwrap().next().is_none());
+
+        // Setup settings cleared.
+        let state = get_setup_state(&conn).unwrap();
+        assert!(!state.setup_complete);
+        assert!(state.managed_root.is_none());
+
+        // packages rows now point back at addon paths.
+        let rows: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT var_path FROM packages ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        for r in &rows {
+            assert!(
+                r.starts_with(addon.to_string_lossy().as_ref()),
+                "var_path {r} should be under {}",
+                addon.display()
+            );
+        }
+    }
+
+    #[test]
+    fn revert_preserves_subfolders() {
+        let (_w, addon, managed, mut conn) = fixture();
+        // Put files in nested subfolders, migrate, then revert. Subfolder
+        // layout should round-trip.
+        let sub = addon.join("AuthorX").join("Group");
+        std::fs::create_dir_all(&sub).unwrap();
+        let p = sub.join("AuthorX.Foo.1.var");
+        std::fs::write(&p, b"foo").unwrap();
+        conn.execute(
+            "INSERT INTO packages (var_path, creator, package_name)
+             VALUES (?1, 'AuthorX', 'Foo')",
+            params![p.to_string_lossy()],
+        )
+        .unwrap();
+
+        begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert!(managed
+            .join("AuthorX")
+            .join("Group")
+            .join("AuthorX.Foo.1.var")
+            .exists());
+
+        let res = revert_setup(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 1);
+        assert_eq!(res.errors.len(), 0);
+        // Back at the original nested location.
+        assert!(p.exists(), "expected file restored at {}", p.display());
+    }
+
+    #[test]
+    fn revert_moves_directory_packages() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_var_dir(&addon, &conn, "DirAuthor.Pkg.1.var");
+
+        begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        let res = revert_setup(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 1);
+        assert_eq!(res.errors.len(), 0);
+
+        let restored = addon.join("DirAuthor.Pkg.1.var");
+        assert!(restored.is_dir());
+        assert!(restored.join("meta.json").exists());
+    }
+
+    #[test]
+    fn revert_refuses_when_destination_occupied() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_var(&addon, &conn, "Author.Foo.1.var");
+
+        begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        // User dropped a file at the would-be destination — we refuse to
+        // overwrite.
+        std::fs::write(addon.join("Author.Foo.1.var"), b"unmanaged drop").unwrap();
+
+        let res = revert_setup(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 0);
+        assert_eq!(res.errors.len(), 1);
+        assert!(res.errors[0].reason.contains("occupied"));
+        // Unmanaged file untouched.
+        let bytes = std::fs::read(addon.join("Author.Foo.1.var")).unwrap();
+        assert_eq!(bytes, b"unmanaged drop");
+        // Managed copy still there too.
+        assert!(managed.join("Author.Foo.1.var").exists());
+    }
+
+    #[test]
+    fn revert_prunes_orphan_rows() {
+        let (_w, addon, managed, mut conn) = fixture();
+        // One real file + one row pointing at a phantom path.
+        add_var(&addon, &conn, "Author.Real.1.var");
+        conn.execute(
+            "INSERT INTO packages (var_path, creator, package_name)
+             VALUES (?1, 'Ghost', 'NotReal')",
+            params![addon.join("Ghost.Phantom.1.var").to_string_lossy()],
+        )
+        .unwrap();
+
+        begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        // The phantom row would have been recorded as "missing" in the
+        // migration error list. After revert, the orphan row is pruned.
+        let res = revert_setup(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 1);
+        assert!(
+            res.orphans_pruned >= 1,
+            "expected ≥1 orphan pruned, got {}",
+            res.orphans_pruned
+        );
+
+        let total_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM packages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total_rows, 1);
     }
 
     #[test]

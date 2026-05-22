@@ -132,6 +132,7 @@ pub fn run() {
             commands::get_setup_state,
             commands::probe_managed_path,
             commands::begin_migration,
+            commands::revert_setup,
             commands::query_packages,
             commands::count_packages,
             commands::list_creators,
