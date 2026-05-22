@@ -53,6 +53,11 @@ interface Props {
   onClose: () => void;
   onFilterByAuthor: (author: string) => void;
   onFilterByType: (type: string) => void;
+  /** Filter the grid by a hub_category value. Used by the inline
+   *  "🔒 Looks" override chip in the subtitle when the user has locked
+   *  a hub category — clicking the chip applies that category as the
+   *  grid filter. */
+  onFilterByHubCategory: (category: string) => void;
   /** Open another package's detail view without dismissing this modal. Used
    *  by the dependency sidebar to navigate between related packages. */
   onOpenPackage: (id: number) => void;
@@ -92,6 +97,7 @@ export function DetailView({
   onClose,
   onFilterByAuthor,
   onFilterByType,
+  onFilterByHubCategory,
   onOpenPackage: _onOpenPackage,
   onActionResult,
 }: Props) {
@@ -242,37 +248,73 @@ export function DetailView({
                 <span className="detail-version">v{pkg.version}</span>
               </div>
               <div className="detail-subtitle">
-                <button
-                  className={`detail-type-link ${
-                    pkg.package_type_manual === 1
-                      ? "detail-type-link-overridden"
-                      : ""
-                  }`}
-                  onClick={() => onFilterByType(pkg.package_type)}
-                  title="Filter grid by this type"
-                >
-                  {pkg.package_type}
-                </button>
+                {/* Override chips: prepend one per active override so the
+                    locked value is the leftmost (and brightest) element
+                    in the subtitle. When package_type itself is overridden,
+                    the existing type chip below shows the original
+                    pre-override value in a demoted white — the override
+                    chip carries the current value.
+                    Order is type → category → author, matching the
+                    "Overrides" section's button order below the fold. */}
                 {pkg.package_type_manual === 1 && (
-                  <>
-                    <span
-                      className="override-lock"
-                      title="Type is locked by user override — scanner won't reclassify on rescan. Use ↺ Restore in the Overrides section."
-                      aria-label="Locked override"
-                    >
-                      🔒
-                    </span>
-                    {pkg.package_type_original &&
-                      pkg.package_type_original !== pkg.package_type && (
-                        <span
-                          className="override-original"
-                          title="Value before your override. Restore to revert."
-                        >
-                          was {pkg.package_type_original}
-                        </span>
-                      )}
-                  </>
+                  <button
+                    type="button"
+                    className="detail-override-chip"
+                    onClick={() => onFilterByType(pkg.package_type)}
+                    title={`Type is locked to "${pkg.package_type}". Click to filter the grid by this type.`}
+                  >
+                    <span className="detail-override-chip-lock" aria-hidden="true">🔒</span>
+                    {pkg.package_type}
+                  </button>
                 )}
+                {pkg.hub_category_manual === 1 && pkg.hub_category && (
+                  <button
+                    type="button"
+                    className="detail-override-chip"
+                    onClick={() => onFilterByHubCategory(pkg.hub_category!)}
+                    title={`Hub category is locked to "${pkg.hub_category}". Click to filter the grid by this category.`}
+                  >
+                    <span className="detail-override-chip-lock" aria-hidden="true">🔒</span>
+                    {pkg.hub_category}
+                  </button>
+                )}
+                {pkg.hub_author_manual === 1 && pkg.hub_author && (
+                  <button
+                    type="button"
+                    className="detail-override-chip"
+                    onClick={() => onFilterByAuthor(pkg.creator)}
+                    title={`Author is locked to "${pkg.hub_author}" (originally "${pkg.hub_author_original ?? "—"}"). Click to filter the grid by ${pkg.creator}.`}
+                  >
+                    <span className="detail-override-chip-lock" aria-hidden="true">🔒</span>
+                    {pkg.hub_author}
+                  </button>
+                )}
+                {/* Existing type chip — when type is overridden it now
+                    shows the ORIGINAL pre-override value (the override
+                    itself is the chip above). When any override of any
+                    field is active, this chip is demoted to plain white
+                    so the locked chip(s) read as the prominent items. */}
+                {(() => {
+                  const hasAnyOverride =
+                    pkg.package_type_manual === 1 ||
+                    pkg.hub_category_manual === 1 ||
+                    pkg.hub_author_manual === 1;
+                  const displayedType =
+                    pkg.package_type_manual === 1 && pkg.package_type_original
+                      ? pkg.package_type_original
+                      : pkg.package_type;
+                  return (
+                    <button
+                      className={`detail-type-link ${
+                        hasAnyOverride ? "detail-type-link-demoted" : ""
+                      }`}
+                      onClick={() => onFilterByType(displayedType)}
+                      title="Filter grid by this type"
+                    >
+                      {displayedType}
+                    </button>
+                  );
+                })()}
                 <span>· {formatSize(pkg.file_size)}</span>
                 <span title="When this .var was last touched on disk">
                   · file {formatDate(pkg.file_mtime)}
@@ -285,33 +327,6 @@ export function DetailView({
                 {pkg.program_version && (
                   <span>· VaM {pkg.program_version}</span>
                 )}
-              </div>
-              {/* Always-visible override status row — gives the user a
-                  one-glance picture of which classification fields are
-                  user-locked vs. auto-assigned, with the pre-override
-                  value when applicable. Renders the same shape whether
-                  anything is overridden or not, so the eye learns where
-                  to look. */}
-              <div className="detail-overrides">
-                <span className="detail-overrides-label">Overrides</span>
-                <OverrideStatus
-                  label="Type"
-                  current={pkg.package_type}
-                  manual={pkg.package_type_manual === 1}
-                  original={pkg.package_type_original}
-                />
-                <OverrideStatus
-                  label="Category"
-                  current={pkg.hub_category ?? "—"}
-                  manual={pkg.hub_category_manual === 1}
-                  original={pkg.hub_category_original}
-                />
-                <OverrideStatus
-                  label="Author"
-                  current={pkg.hub_author ?? pkg.creator ?? "—"}
-                  manual={pkg.hub_author_manual === 1}
-                  original={pkg.hub_author_original}
-                />
               </div>
             </div>
 
@@ -955,47 +970,6 @@ function HubInfoSection({
       )}
 
     </section>
-  );
-}
-
-interface OverrideStatusProps {
-  label: string;
-  current: string;
-  manual: boolean;
-  original: string | null;
-}
-
-/// Compact pill showing one overrideable field's current state + lock
-/// status + pre-override value. Always rendered (even when not locked)
-/// so the user can scan the header to find what's overridden at a
-/// glance — the "no matter if overridden or not" requirement.
-function OverrideStatus({
-  label,
-  current,
-  manual,
-  original,
-}: OverrideStatusProps) {
-  const showOriginal = manual && original && original !== current;
-  return (
-    <span
-      className={`override-chip ${manual ? "override-chip-locked" : ""}`}
-      title={
-        manual
-          ? `${label}: ${current} — locked by user override${
-              showOriginal ? `; was ${original} before` : ""
-            }`
-          : `${label}: ${current} — auto (no override)`
-      }
-    >
-      <span className="override-chip-lock" aria-hidden="true">
-        {manual ? "🔒" : "·"}
-      </span>
-      <span className="override-chip-label">{label}</span>
-      <span className="override-chip-value">{current}</span>
-      {showOriginal && (
-        <span className="override-chip-was">← was {original}</span>
-      )}
-    </span>
   );
 }
 

@@ -838,6 +838,10 @@ export default function App() {
             setSelectedType(t as PackageType);
             setDetailPackageId(null);
           }}
+          onFilterByHubCategory={(c) => {
+            setSelectedHubCategory(c);
+            setDetailPackageId(null);
+          }}
           onOpenPackage={setDetailPackageId}
           onActionResult={handleActionResult}
         />

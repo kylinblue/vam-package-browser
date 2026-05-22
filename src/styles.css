@@ -1876,71 +1876,43 @@ html, body, #root {
   opacity: 0.6;
 }
 
-/* Type chip when the underlying package_type is user-overridden:
-   subtle accent + slight weight bump so the "I picked this" signal is
-   readable next to the regular subtitle text. */
-.detail-type-link-overridden {
-  color: var(--accent);
-  font-weight: 500;
-}
-
-/* Always-visible override status row in the detail header. Shows the
-   current value + lock state for each of the three classification
-   fields. Renders with the same chrome whether anything is overridden
-   or not — the user learns where to scan and the layout doesn't shift
-   when they toggle a lock. */
-.detail-overrides {
-  margin-top: 6px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-}
-.detail-overrides-label {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-  color: var(--fg-dim);
-  margin-right: 2px;
-}
-.override-chip {
+/* Inline override chips in the subtitle. Each represents one
+   user-locked classification field (type / hub_category / hub_author).
+   Styled like a filter-link button — accent color, soft tinted
+   background, padlock prefix. Clicking applies the value as a grid
+   filter so the user can pivot directly from the lock indicator. */
+.detail-override-chip {
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
-  padding: 2px 6px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--fg-dim);
+  padding: 1px 6px;
+  border: 1px solid var(--accent);
+  background: rgba(122, 162, 255, 0.15);
+  color: var(--accent);
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
   white-space: nowrap;
 }
-.override-chip-locked {
-  border-color: rgba(122, 162, 255, 0.55);
-  background: rgba(122, 162, 255, 0.10);
+.detail-override-chip:hover {
+  background: rgba(122, 162, 255, 0.28);
+}
+.detail-override-chip-lock {
+  font-size: 10px;
+  opacity: 0.9;
+}
+
+/* When any override chip is present, the existing type chip (which
+   keeps showing the pre-override package_type) goes white/neutral so
+   the override reads as the prominent leftmost element. */
+.detail-type-link-demoted {
   color: var(--fg);
 }
-.override-chip-lock {
-  font-size: 10px;
-}
-.override-chip-label {
-  color: var(--fg-dim);
-  font-size: 10px;
-}
-.override-chip-locked .override-chip-label {
-  color: var(--accent);
-}
-.override-chip-value {
+.detail-type-link-demoted:hover {
   color: var(--fg);
-  font-weight: 500;
-}
-.override-chip-locked .override-chip-value {
-  color: var(--accent);
-}
-.override-chip-was {
-  font-size: 10px;
-  color: var(--fg-dim);
-  font-style: italic;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
 /* Author override row sits below the hub-meta badges (or as the only
