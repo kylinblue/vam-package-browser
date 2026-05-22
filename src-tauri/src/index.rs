@@ -75,6 +75,28 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v15_to_v16(&conn)?;
         conn.pragma_update(None, "user_version", 16)?;
     }
+    // v16 → v20 added by feat/hub-pin-and-group-select. The hub-pin
+    // branch originally numbered hub_category_manual at v15 → v16, but
+    // that collided with this branch's predicted_* migration on the
+    // shared dev DB. Renumbered to v16 → v17 onward; every migration
+    // is defensive (add_column_if_absent) so the schema converges
+    // regardless of prior state.
+    if current < 17 {
+        migrate_v16_to_v17(&conn)?;
+        conn.pragma_update(None, "user_version", 17)?;
+    }
+    if current < 18 {
+        migrate_v17_to_v18(&conn)?;
+        conn.pragma_update(None, "user_version", 18)?;
+    }
+    if current < 19 {
+        migrate_v18_to_v19(&conn)?;
+        conn.pragma_update(None, "user_version", 19)?;
+    }
+    if current < 20 {
+        migrate_v19_to_v20(&conn)?;
+        conn.pragma_update(None, "user_version", 20)?;
+    }
     Ok(conn)
 }
 
@@ -101,15 +123,88 @@ fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
+    // `hub_category_manual = 1` means "the user set this category; auto-
+    // sync writers must leave it alone". Sync writers honor this with a
+    // CASE expression in their UPDATE statements; set_hub_category
+    // toggles the flag on, clear_override toggles it off and restores
+    // from hub_category_original. Stored as INTEGER (0/1) for cheap
+    // WHERE filters.
+    //
+    // Originally landed at v15 → v16 on the feat/hub-pin branch;
+    // renumbered to v16 → v17 to coexist with the predicted_*
+    // migration above. Uses add_column_if_absent so it's safe on
+    // databases that already ran the old v15 → v16 with the same
+    // content.
+    add_column_if_absent(conn, "hub_category_manual", "INTEGER DEFAULT 0")?;
+    Ok(())
+}
+
+fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
+    // Same manual-flag pattern for `hub_author`. A creator's hub display
+    // name sometimes diverges from how the user thinks of them — typos,
+    // renames, etc. `hub_author_manual = 1` protects the corrected name
+    // from being clobbered on the next hub sync.
+    add_column_if_absent(conn, "hub_author_manual", "INTEGER DEFAULT 0")?;
+    Ok(())
+}
+
+fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
+    // Same pattern for the LOCAL heuristic `package_type` (scanner-
+    // derived from contentList path prefixes). The scanner upserts
+    // packages with a CASE expression on package_type_manual=1 so user
+    // overrides survive rescans.
+    add_column_if_absent(conn, "package_type_manual", "INTEGER DEFAULT 0")?;
+    Ok(())
+}
+
+fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
+    // Snapshot columns for the three overrideable fields. When the user
+    // does their first set_* override on a row, the previous (auto-
+    // assigned) value is stashed here so the UI can show "X (was Y)"
+    // and clear_override can restore the prior value without needing a
+    // resync or rescan.
+    add_column_if_absent(conn, "package_type_original", "TEXT")?;
+    add_column_if_absent(conn, "hub_category_original", "TEXT")?;
+    add_column_if_absent(conn, "hub_author_original", "TEXT")?;
+    Ok(())
+}
+
+fn add_column_if_absent(conn: &Connection, name: &str, decl: &str) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('packages') WHERE name = ?1",
+        [name],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if !exists {
+        conn.execute_batch(&format!(
+            "ALTER TABLE packages ADD COLUMN {name} {decl};"
+        ))?;
+    }
+    Ok(())
+}
+
 fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
     // Two columns split out of v14 after a downstream Cowork recon revealed
     // that paid resources expose their offsite URL via the 301 Location
     // header on /resources/.../download (capture that as hub_external_url),
     // and that we need to distinguish how each pin was made for UI
-    // transparency (hub_match_method: 'filename' | 'fuzzy_title' | 'manual').
-    // These could not be folded back into v14 without breaking installs that
-    // already applied the original 4-column v14 — adding them in a fresh
-    // migration is the clean fix.
+    // transparency.
+    //
+    // Reserved hub_match_method values (v16+):
+    //   'filename'    — auto: exact .var filename matched a hub-hosted CDN
+    //                   filename.
+    //   'fuzzy_title' — auto: paid-fallback fuzzy title match.
+    //   'manual'      — user pinned a package that had NO prior hub match.
+    //   'override'    — user pinned a package whose prior match was
+    //                   filename / fuzzy_title (user-corrected an auto-match).
+    //   'inherit'     — propagated from a sibling row (same creator +
+    //                   package_name OR same creator's hub_author backfill).
+    //                   Subject to background verification.
+    //
+    // Auto-sync writers MUST NOT overwrite rows whose hub_match_method is
+    // 'manual' or 'override' — both protect user intent. 'inherit' is fair
+    // game (verification may demote it back to NULL).
     conn.execute_batch(
         r#"
         ALTER TABLE packages ADD COLUMN hub_external_url TEXT;

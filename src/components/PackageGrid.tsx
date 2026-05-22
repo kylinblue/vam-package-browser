@@ -50,6 +50,16 @@ interface Props {
    *  package has been matched on the hub; falls back to heuristic per-tile
    *  for unmatched packages so the grid stays populated. */
   displayMode?: "heuristic" | "hub";
+  /** Group-select state. When `selectionMode` is true, primary clicks toggle
+   *  selection instead of opening the detail view, and a checkbox overlay
+   *  becomes visible on every tile. Outside select mode, Ctrl/Meta-click on
+   *  a tile still toggles selection (power-user path), and Shift-click does
+   *  range-select from the last clicked tile.
+   *  `onToggleSelect(id, additive, range)` — `additive=false` clears prior
+   *  selection; `range=true` requests a range fill from the last anchor. */
+  selectionMode: boolean;
+  selectedIds: Set<number>;
+  onToggleSelect: (id: number, additive: boolean, range: boolean) => void;
 }
 
 function formatSize(bytes: number): string {
@@ -79,6 +89,9 @@ export function PackageGrid({
   onFilterByType,
   onViewportWidth,
   displayMode = "heuristic",
+  selectionMode,
+  selectedIds,
+  onToggleSelect,
 }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -176,6 +189,9 @@ export function PackageGrid({
                   onOpenDetail={onOpenDetail}
                   onFilterByAuthor={onFilterByAuthor}
                   onFilterByType={onFilterByType}
+                  selectionMode={selectionMode}
+                  isSelected={selectedIds.has(pkg.id)}
+                  onToggleSelect={onToggleSelect}
                 />
               ))}
             </div>
@@ -215,6 +231,9 @@ interface TileProps {
   onOpenDetail: (id: number) => void;
   onFilterByAuthor: (author: string) => void;
   onFilterByType: (type: string) => void;
+  selectionMode: boolean;
+  isSelected: boolean;
+  onToggleSelect: (id: number, additive: boolean, range: boolean) => void;
 }
 
 function Tile({
@@ -227,20 +246,37 @@ function Tile({
   onOpenDetail,
   onFilterByAuthor,
   onFilterByType,
+  selectionMode,
+  isSelected,
+  onToggleSelect,
 }: TileProps) {
   const filename = pkg.var_path.split(/[\\/]/).pop() ?? pkg.var_path;
-  // Hub-mode overrides: prefer hub_title / hub_category when available;
-  // fall back to local fields when the package isn't pinned. The boolean
-  // tells the JSX below which badge to render (heuristic emoji+text vs
-  // hub category text).
-  const useHub = displayMode === "hub" && !!pkg.hub_resource_id;
-  const displayTitle = useHub && pkg.hub_title ? pkg.hub_title : (pkg.package_name || filename);
-  const displayBadge = useHub && pkg.hub_category ? pkg.hub_category : pkg.package_type;
-  const isPaid = useHub && pkg.hub_billing_tier !== null && pkg.hub_billing_tier !== undefined;
-  const isOffsite = useHub && pkg.hub_is_hub_hosted === 0;
-  // "ghost" = in hub mode but no hub match → tile is dim so the user
-  // sees they're outside the hub-data picture for these.
-  const isHubGhost = displayMode === "hub" && !pkg.hub_resource_id;
+  // Hub-mode display rules:
+  //   - title/billing/hosted info still need a real pin (no point claiming
+  //     a hub title for a row that isn't linked).
+  //   - badge prefers hub_category whenever it's set — including user
+  //     overrides on unpinned rows. The user explicitly declared the
+  //     category, so showing the local heuristic instead would be wrong.
+  //   - "ghost" status (dimmed tile) loosens too: a user-set hub_category
+  //     counts as "this row has hub-side meaning", so it isn't ghosted.
+  const useHubPin = displayMode === "hub" && !!pkg.hub_resource_id;
+  const displayTitle = useHubPin && pkg.hub_title ? pkg.hub_title : (pkg.package_name || filename);
+  const displayBadge =
+    displayMode === "hub" && pkg.hub_category
+      ? pkg.hub_category
+      : pkg.package_type;
+  const isPaid = useHubPin && pkg.hub_billing_tier !== null && pkg.hub_billing_tier !== undefined;
+  const isOffsite = useHubPin && pkg.hub_is_hub_hosted === 0;
+  const isHubGhost =
+    displayMode === "hub" && !pkg.hub_resource_id && !pkg.hub_category;
+  // Whether the badge currently represents a user-locked classification —
+  // drives the "brighter" visual treatment + a small lock indicator. In
+  // Fetched mode we show hub_category (locked = hub_category_manual). In
+  // Simple/Tagged we show package_type (locked = package_type_manual).
+  const badgeIsLocked =
+    displayMode === "hub"
+      ? pkg.hub_category_manual === 1
+      : pkg.package_type_manual === 1;
   const items = categoryStrip(pkg);
   const itemsTooltip = items.map((i) => `${i.n} ${i.label}`).join(", ");
   const fullTitle = pkg.error
@@ -348,16 +384,52 @@ function Tile({
     if (pkg.error) return;
     // Don't open detail when the click is on an action button (favorite/hide).
     if ((e.target as HTMLElement).closest("button")) return;
+
+    const ctrlOrMeta = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+
+    // Modifier-driven selection works in any mode. Shift requests a range
+    // fill from the last clicked anchor (App-level state).
+    if (ctrlOrMeta || shift) {
+      e.preventDefault();
+      onToggleSelect(pkg.id, true, shift);
+      return;
+    }
+
+    // Plain click in select mode: toggle this one, keep prior selections.
+    if (selectionMode) {
+      onToggleSelect(pkg.id, true, false);
+      return;
+    }
+
+    // Default: open detail.
     onOpenDetail(pkg.id);
   };
 
+  const tileClass = [
+    "tile",
+    isHubGhost ? "tile-hub-ghost" : "",
+    isSelected ? "tile-selected" : "",
+    selectionMode ? "tile-select-mode" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div
-      className={`tile ${isHubGhost ? "tile-hub-ghost" : ""}`}
+      className={tileClass}
       title={fullTitle}
       onClick={onClick}
       onContextMenu={onContextMenu}
     >
+      {(selectionMode || isSelected) && (
+        <div
+          className={`tile-select-mark ${isSelected ? "tile-select-mark-on" : ""}`}
+          aria-label={isSelected ? "Selected" : "Not selected"}
+        >
+          {isSelected ? "✓" : ""}
+        </div>
+      )}
       {menuPos && (
         <ContextMenu
           x={menuPos.x}
@@ -442,7 +514,25 @@ function Tile({
         </div>
         <div className="tile-name">{displayTitle}</div>
         <div className="tile-row">
-          <span className={`tile-type-badge ${useHub ? "tile-type-badge-hub" : ""}`}>{displayBadge}</span>
+          <span
+            className={[
+              "tile-type-badge",
+              displayMode === "hub" && pkg.hub_category
+                ? "tile-type-badge-hub"
+                : "",
+              badgeIsLocked ? "tile-type-badge-locked" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            title={
+              badgeIsLocked
+                ? `${displayBadge} (user-locked — won't be auto-changed)`
+                : displayBadge
+            }
+          >
+            {badgeIsLocked && <span className="tile-type-lock">🔒</span>}
+            {displayBadge}
+          </span>
           {isPaid && (
             <span
               className={`tile-paid-badge ${isOffsite ? "tile-paid-offsite" : ""}`}

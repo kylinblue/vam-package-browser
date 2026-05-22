@@ -68,6 +68,72 @@ html, body, #root {
 }
 .toolbar-toggle input { cursor: pointer; }
 
+.toolbar-clear-filters {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* App-level toast — lives at the app root so it survives child
+   component unmounts (DetailView blanking out during a refetch, etc). */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1000;
+  max-width: 480px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  border-left: 3px solid;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  animation: toast-in 180ms ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.toast-ok {
+  border-left-color: rgba(140, 210, 160, 0.85);
+}
+.toast-error {
+  border-left-color: rgba(235, 140, 120, 0.85);
+}
+.toast-text {
+  flex: 1 1 auto;
+}
+.toast-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.toast-dismiss:hover {
+  color: var(--fg);
+}
+.toolbar-clear-filters:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.toolbar-clear-filters:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .toolbar-range-group {
   display: inline-flex;
   align-items: center;
@@ -250,6 +316,7 @@ html, body, #root {
   flex-direction: column;
   cursor: pointer;
   transition: background 80ms, border-color 80ms;
+  position: relative; /* anchor for .tile-select-mark */
 }
 .tile:hover { background: var(--tile-bg-hover); border-color: var(--accent); }
 
@@ -507,6 +574,48 @@ html, body, #root {
   gap: 4px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.detail-type-edit {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  border-radius: 3px;
+  padding: 0 4px;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.detail-type-edit:hover {
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.detail-type-picker {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+
+.detail-type-feedback {
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  border-left: 2px solid;
+}
+.detail-type-feedback-ok {
+  background: rgba(140, 210, 160, 0.08);
+  border-left-color: rgba(140, 210, 160, 0.7);
+  color: var(--fg);
+}
+.detail-type-feedback-error {
+  background: rgba(235, 140, 120, 0.08);
+  border-left-color: rgba(235, 140, 120, 0.7);
+  color: var(--fg);
 }
 .detail-body {
   display: grid;
@@ -1587,6 +1696,22 @@ html, body, #root {
   color: var(--fg);
 }
 
+/* Locked badge: the user has explicitly classified this package
+   (package_type override in Simple/Tagged, hub_category override in
+   Fetched). Render brighter than the default muted look so the
+   override status is obvious at grid-scan speed. */
+.tile-type-badge-locked {
+  background: rgba(122, 162, 255, 0.22);
+  border-color: rgba(122, 162, 255, 0.65);
+  color: var(--fg);
+  font-weight: 500;
+}
+.tile-type-lock {
+  margin-right: 2px;
+  font-size: 9px;
+  opacity: 0.85;
+}
+
 .tile-paid-badge {
   background: rgba(255, 192, 64, 0.15);
   border: 1px solid rgba(255, 192, 64, 0.45);
@@ -1666,6 +1791,334 @@ html, body, #root {
 .hub-tier-method {
   color: var(--fg-dim);
   font-style: italic;
+}
+/* User-driven match methods carry more visual weight — they reflect a
+   deliberate choice rather than an auto-match. Subtle accent border. */
+.hub-tier-method-manual,
+.hub-tier-method-override {
+  color: var(--accent);
+  font-style: normal;
+  border-color: rgba(122, 162, 255, 0.4);
+}
+.hub-tier-method-inherit {
+  color: var(--fg-dim);
+  font-style: italic;
+  border-style: dashed;
+}
+
+.detail-hub-empty {
+  color: var(--fg-dim);
+  font-style: italic;
+  padding: 4px 0 8px 0;
+}
+
+.detail-hub-pin-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: center;
+}
+.detail-hub-pin-row input[type="text"],
+.detail-hub-pin-row select {
+  flex: 1 1 auto;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.detail-hub-pin-row input[type="text"]:focus,
+.detail-hub-pin-row select:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.detail-action-primary {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* Restore / Unpin actions sit alongside the override buttons. Muted by
+   default so they don't compete visually with the primary actions — they
+   only matter to a user who already overrode something. */
+.detail-action-restore {
+  color: var(--fg-dim);
+  font-size: 11px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.detail-action-restore:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Subtle marker next to overridden fields (package_type chip etc). */
+.override-lock {
+  font-size: 10px;
+  opacity: 0.75;
+  margin-left: 2px;
+  cursor: help;
+}
+
+/* Muted "(was X)" annotation shown after an overridden value so the user
+   can see both the current override and the pristine pre-override
+   value at a glance. The arrow-like → could be added later if needed,
+   but plain "was X" reads clearly. */
+.override-original {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.override-original::before {
+  content: "← ";
+  opacity: 0.6;
+}
+
+/* Inline override chips in the subtitle. Each represents one
+   user-locked classification field (type / hub_category / hub_author).
+   Styled like a filter-link button — accent color, soft tinted
+   background, padlock prefix. Clicking applies the value as a grid
+   filter so the user can pivot directly from the lock indicator. */
+.detail-override-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--accent);
+  background: rgba(122, 162, 255, 0.15);
+  color: var(--accent);
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.detail-override-chip:hover {
+  background: rgba(122, 162, 255, 0.28);
+}
+.detail-override-chip-lock {
+  font-size: 10px;
+  opacity: 0.9;
+}
+
+/* When any override chip is present, the existing type chip (which
+   keeps showing the pre-override package_type) goes white/neutral so
+   the override reads as the prominent leftmost element. */
+.detail-type-link-demoted {
+  color: var(--fg);
+}
+.detail-type-link-demoted:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Author override row sits below the hub-meta badges (or as the only
+   override-info element when the package isn't hub-matched). */
+.detail-hub-author-override {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--fg);
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.detail-hub-author-override strong {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.hub-tier-locked {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.detail-action-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+  border-color: var(--border);
+}
+
+.detail-hub-feedback {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  border-left: 2px solid;
+}
+.detail-hub-feedback-ok {
+  background: rgba(140, 210, 160, 0.08);
+  border-left-color: rgba(140, 210, 160, 0.7);
+  color: var(--fg);
+}
+.detail-hub-feedback-error {
+  background: rgba(235, 140, 120, 0.08);
+  border-left-color: rgba(235, 140, 120, 0.7);
+  color: var(--fg);
+}
+
+/* ── Selection (tile chrome + bottom action bar) ─────────────────────── */
+
+.tile-select-mark {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--accent);
+  border-radius: 3px;
+  background: rgba(15, 17, 21, 0.7);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 600;
+  pointer-events: none;
+}
+.tile-select-mark-on {
+  background: var(--accent);
+  color: var(--bg);
+}
+.tile-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.tile-select-mode {
+  /* Slightly fade unselected tiles in select mode so the selected ones
+     read more clearly. Keep subtle — the user is still scanning thumbs. */
+  cursor: pointer;
+}
+.tile-select-mode:not(.tile-selected) .tile-thumb {
+  opacity: 0.85;
+}
+
+.selection-bar {
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.selection-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.selection-bar-count {
+  font-weight: 600;
+  color: var(--fg);
+  margin-right: 4px;
+}
+
+.selection-bar-action {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 3px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.selection-bar-action:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.selection-bar-action.active {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: rgba(122, 162, 255, 0.08);
+}
+.selection-bar-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.selection-bar-primary {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.selection-bar-clear {
+  margin-left: auto;
+}
+
+/* Select-mode toggle nested inside the bar. Replaces the toolbar's
+   former checkbox; the bar is permanently visible so the toggle lives
+   in a single, predictable spot. */
+.selection-bar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+  margin-right: 4px;
+}
+.selection-bar-toggle input { cursor: pointer; }
+
+/* Restore button — visually subdued so it doesn't compete with the
+   forward-direction override buttons next to it. */
+.selection-bar-restore {
+  color: var(--fg-dim);
+}
+.selection-bar-restore:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The bar is always visible now. When nothing's selected it appears
+   in a muted state so it doesn't shout for attention; when a selection
+   exists, the active class lifts the contrast. */
+.selection-bar:not(.selection-bar-active) {
+  opacity: 0.85;
+}
+
+.selection-bar-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.selection-bar-form input[type="text"],
+.selection-bar-form select {
+  flex: 1 1 auto;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 12px;
+  min-width: 200px;
+}
+.selection-bar-form input[type="text"]:focus,
+.selection-bar-form select:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.selection-bar-feedback {
+  padding: 6px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  border-left: 2px solid;
+}
+.selection-bar-feedback-ok {
+  background: rgba(140, 210, 160, 0.08);
+  border-left-color: rgba(140, 210, 160, 0.7);
+  color: var(--fg);
+}
+.selection-bar-feedback-error {
+  background: rgba(235, 140, 120, 0.08);
+  border-left-color: rgba(235, 140, 120, 0.7);
+  color: var(--fg);
 }
 
 .stats-panel {
