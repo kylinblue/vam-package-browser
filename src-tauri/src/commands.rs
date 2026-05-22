@@ -3630,15 +3630,19 @@ pub async fn clear_override(
         let now = unix_now();
 
         for &package_id in &package_ids {
-            // Restoring an override pulls the pristine value back from
-            // the _original snapshot (set when the user first ran the
-            // matching set_* command). COALESCE handles the edge case
-            // where _original is NULL — leaves the current value alone
-            // rather than nulling it out.
+            // Restoring pulls the pristine value straight from the
+            // _original snapshot. Deliberately NOT COALESCE: if the
+            // snapshot is NULL (pre-v20 override, or the original truly
+            // was NULL), the current value clears too — that's the
+            // honest "back to the pre-override state" semantic.
+            //
+            // For package_type (NOT NULL, DEFAULT 'Unknown') we fall
+            // back to 'Unknown' when the snapshot is absent; the user
+            // can rescan to get a real heuristic classification back.
             let n = match field.as_str() {
                 "category" => tx.execute(
                     "UPDATE packages SET
-                       hub_category = COALESCE(hub_category_original, hub_category),
+                       hub_category = hub_category_original,
                        hub_category_original = NULL,
                        hub_category_manual = 0
                      WHERE id = ?1
@@ -3648,7 +3652,7 @@ pub async fn clear_override(
                 ),
                 "author" => tx.execute(
                     "UPDATE packages SET
-                       hub_author = COALESCE(hub_author_original, hub_author),
+                       hub_author = hub_author_original,
                        hub_author_original = NULL,
                        hub_author_manual = 0
                      WHERE creator = (SELECT creator FROM packages WHERE id = ?1)",
@@ -3656,7 +3660,7 @@ pub async fn clear_override(
                 ),
                 "type" => tx.execute(
                     "UPDATE packages SET
-                       package_type = COALESCE(package_type_original, package_type),
+                       package_type = COALESCE(package_type_original, 'Unknown'),
                        package_type_original = NULL,
                        package_type_manual = 0
                      WHERE id = ?1
