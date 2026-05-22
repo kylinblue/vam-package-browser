@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import {
+  clearOverride,
   setHubAuthor,
   setHubCategory,
   setHubPin,
   setPackageType,
   type AuthorReport,
   type CategoryReport,
+  type OverrideField,
   type PackageType,
   type PackageTypeReport,
   type PinReport,
@@ -55,13 +57,20 @@ const HUB_CATEGORIES: readonly string[] = [
 ];
 
 interface Props {
-  /** Currently selected package ids. Bar renders only when non-empty
-   *  (App.tsx gates the mount), so this is always |sel| >= 1. */
+  /** Currently selected package ids. Bar is always mounted now; when
+   *  this is empty the action buttons are disabled and the bar acts as
+   *  a permanent entry point for select mode. */
   selection: number[];
   /** Drives the classify action — hub_category in Fetched mode, the
    *  local heuristic package_type in Simple/Tagged. Same UI slot, mode
    *  picks the backend command and the option list. */
   viewMode: "simple" | "tagged" | "fetched";
+  /** Select-mode toggle moved into the bar (used to live in the
+   *  toolbar). Off = tile clicks open the detail view, on = tile
+   *  clicks toggle selection. Modifier-driven select (Ctrl / Shift)
+   *  still works in either mode. */
+  selectionMode: boolean;
+  onSelectionModeChange: (next: boolean) => void;
   /** Tell App.tsx to clear the selection (after the user explicitly
    *  clears, or implicitly after a successful bulk action). */
   onClear: () => void;
@@ -79,6 +88,8 @@ interface Props {
 export function SelectionActionBar({
   selection,
   viewMode,
+  selectionMode,
+  onSelectionModeChange,
   onClear,
   onActionResult,
   onSetVisibility,
@@ -97,7 +108,9 @@ export function SelectionActionBar({
     isFetched ? "Scenes" : "Scene",
   );
   const [authorDraft, setAuthorDraft] = useState("");
-  const [busy, setBusy] = useState<"pin" | "classify" | "author" | null>(null);
+  const [busy, setBusy] = useState<
+    "pin" | "classify" | "author" | "clear" | null
+  >(null);
 
   // Re-seed the draft + close the form on mode flip so the dropdown
   // doesn't carry a stale value from the previous mode's option list.
@@ -202,6 +215,36 @@ export function SelectionActionBar({
     }
   }
 
+  // Walks all four overrideable fields and clears whichever ones are
+  // actually set on the selected rows. The backend SQL carries safety
+  // guards (manual=1 for category/author/type; match_method IN
+  // ('manual','override') for pin) so this is a no-op on auto-matched
+  // packages — passing a mixed selection of overridden + auto-matched
+  // rows touches only the overridden ones.
+  async function handleClearAllOverrides() {
+    if (busy) return;
+    setBusy("clear");
+    try {
+      let total = 0;
+      const fields: OverrideField[] = ["category", "author", "type", "pin"];
+      for (const field of fields) {
+        const report = await clearOverride(selection, field);
+        total += report.rows_updated;
+      }
+      const msg =
+        total > 0
+          ? `Cleared overrides on ${total} row${total === 1 ? "" : "s"} (auto-matched packages were left alone).`
+          : `Nothing to clear — none of the ${selection.length} selected package${selection.length === 1 ? "" : "s"} had user overrides.`;
+      onActionResult({ kind: "ok", text: msg });
+      reset();
+      onClear();
+    } catch (e) {
+      onActionResult({ kind: "error", text: `Clear failed: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function handleAuthor() {
     if (!authorDraft.trim() || busy) return;
     setBusy("author");
@@ -246,11 +289,27 @@ export function SelectionActionBar({
     }
   }, [mode, canPin]);
 
+  const hasSelection = n > 0;
+  const actionsDisabled = !hasSelection || busy !== null;
+
   return (
-    <div className="selection-bar">
+    <div className={`selection-bar ${hasSelection ? "selection-bar-active" : ""}`}>
       <div className="selection-bar-row">
+        {/* Select-mode toggle lives in the bar now (was a toolbar item).
+            The bar is permanently visible at the bottom of the view, so
+            the toggle is always reachable in one consistent place. */}
+        <label className="selection-bar-toggle" title="Toggle multi-select mode. With it on, tile clicks add to selection instead of opening the detail view.">
+          <input
+            type="checkbox"
+            checked={selectionMode}
+            onChange={(e) => onSelectionModeChange(e.target.checked)}
+          />
+          <span>📋 Select mode</span>
+        </label>
         <span className="selection-bar-count">
-          {n.toLocaleString()} selected
+          {hasSelection
+            ? `${n.toLocaleString()} selected`
+            : "(nothing selected)"}
         </span>
         <button
           type="button"
@@ -258,11 +317,13 @@ export function SelectionActionBar({
           onClick={() => {
             setMode(mode === "pin" ? "closed" : "pin");
           }}
-          disabled={busy !== null || !canPin}
+          disabled={actionsDisabled || !canPin}
           title={
-            canPin
-              ? "Pin this package to a hub resource URL"
-              : "Pin URL works on one package at a time — one URL maps to one hub resource. Sibling versions auto-inherit via propagation."
+            !hasSelection
+              ? "Select at least one tile first"
+              : canPin
+                ? "Pin this package to a hub resource URL"
+                : "Pin URL works on one package at a time — one URL maps to one hub resource. Sibling versions auto-inherit via propagation."
           }
         >
           Pin to hub URL…
@@ -273,11 +334,13 @@ export function SelectionActionBar({
           onClick={() => {
             setMode(mode === "classify" ? "closed" : "classify");
           }}
-          disabled={busy !== null}
+          disabled={actionsDisabled}
           title={
-            isFetched
-              ? "Override hub_category for selected packages — protected from auto-sync overwrites"
-              : "Override the local heuristic package_type — kept across rescans, propagates to sibling versions"
+            !hasSelection
+              ? "Select at least one tile first"
+              : isFetched
+                ? "Override hub_category for selected packages — protected from auto-sync overwrites"
+                : "Override the local heuristic package_type — kept across rescans, propagates to sibling versions"
           }
         >
           {classifyLabel}
@@ -288,19 +351,38 @@ export function SelectionActionBar({
           onClick={() => {
             setMode(mode === "author" ? "closed" : "author");
           }}
-          disabled={busy !== null}
-          title="Override the hub_author for selected packages. Propagates to every other package by the same creator(s) and protects against auto-sync overwrites."
+          disabled={actionsDisabled}
+          title={
+            !hasSelection
+              ? "Select at least one tile first"
+              : "Override the hub_author for selected packages. Propagates to every other package by the same creator(s) and protects against auto-sync overwrites."
+          }
         >
           Override author…
         </button>
         <button
           type="button"
+          className="selection-bar-action selection-bar-restore"
+          onClick={handleClearAllOverrides}
+          disabled={actionsDisabled}
+          title={
+            !hasSelection
+              ? "Select at least one tile first"
+              : "Release all user overrides on the selected packages (category / author / type / pin). Auto-matched packages are not affected — only fields YOU set."
+          }
+        >
+          {busy === "clear" ? "Clearing…" : "↺ Clear overrides"}
+        </button>
+        <button
+          type="button"
           className="selection-bar-action"
           onClick={() => onSetVisibility?.(selection)}
-          disabled={!onSetVisibility}
+          disabled={!onSetVisibility || !hasSelection}
           title={
             onSetVisibility
-              ? "Set visibility for selected packages"
+              ? !hasSelection
+                ? "Select at least one tile first"
+                : "Set visibility for selected packages"
               : "Visibility presets — see TODO-visibility-presets.md (wired by a separate session)"
           }
         >
@@ -313,8 +395,8 @@ export function SelectionActionBar({
             reset();
             onClear();
           }}
-          disabled={busy !== null}
-          title="Clear selection (Esc)"
+          disabled={actionsDisabled}
+          title="Clear selection"
         >
           Clear
         </button>

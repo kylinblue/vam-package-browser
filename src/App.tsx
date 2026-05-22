@@ -639,14 +639,6 @@ export default function App() {
             />
             <span>📊 Stats</span>
           </label>
-          <label className="toolbar-toggle">
-            <input
-              type="checkbox"
-              checked={selectionMode}
-              onChange={(e) => setSelectionMode(e.target.checked)}
-            />
-            <span>📋 Select{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}</span>
-          </label>
           <button
             type="button"
             className="toolbar-clear-filters"
@@ -871,17 +863,17 @@ export default function App() {
         />
       )}
 
-      {selectedIds.size > 0 && (
-        <SelectionActionBar
-          selection={[...selectedIds]}
-          viewMode={viewMode}
-          onClear={() => {
-            setSelectedIds(new Set());
-            setSelectionAnchor(null);
-          }}
-          onActionResult={handleActionResult}
-        />
-      )}
+      <SelectionActionBar
+        selection={[...selectedIds]}
+        viewMode={viewMode}
+        selectionMode={selectionMode}
+        onSelectionModeChange={setSelectionMode}
+        onClear={() => {
+          setSelectedIds(new Set());
+          setSelectionAnchor(null);
+        }}
+        onActionResult={handleActionResult}
+      />
 
       <Toast toast={toast} onDismiss={() => setToast(null)} />
 

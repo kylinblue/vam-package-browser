@@ -2051,6 +2051,37 @@ html, body, #root {
   margin-left: auto;
 }
 
+/* Select-mode toggle nested inside the bar. Replaces the toolbar's
+   former checkbox; the bar is permanently visible so the toggle lives
+   in a single, predictable spot. */
+.selection-bar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+  margin-right: 4px;
+}
+.selection-bar-toggle input { cursor: pointer; }
+
+/* Restore button — visually subdued so it doesn't compete with the
+   forward-direction override buttons next to it. */
+.selection-bar-restore {
+  color: var(--fg-dim);
+}
+.selection-bar-restore:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The bar is always visible now. When nothing's selected it appears
+   in a muted state so it doesn't shout for attention; when a selection
+   exists, the active class lifts the contrast. */
+.selection-bar:not(.selection-bar-active) {
+  opacity: 0.85;
+}
+
 .selection-bar-form {
   display: flex;
   gap: 6px;

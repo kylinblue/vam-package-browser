@@ -3640,14 +3640,24 @@ pub async fn clear_override(
             // back to 'Unknown' when the snapshot is absent; the user
             // can rescan to get a real heuristic classification back.
             let n = match field.as_str() {
+                // Each branch carries a safety guard so the UPDATE is a
+                // no-op on rows that don't actually have a user override
+                // for this field. Matters for bulk-clear callers (the
+                // multi-select "Clear overrides" button) that pass mixed
+                // sets of overridden + auto-matched rows: we must NOT
+                // wipe values on rows the user never touched. For
+                // category/author/type the guard is the _manual flag;
+                // for pin it's hub_match_method ∈ ('manual','override'),
+                // which protects filename / fuzzy_title auto-matches.
                 "category" => tx.execute(
                     "UPDATE packages SET
                        hub_category = hub_category_original,
                        hub_category_original = NULL,
                        hub_category_manual = 0
-                     WHERE id = ?1
-                       OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
-                       AND package_name = (SELECT package_name FROM packages WHERE id = ?1))",
+                     WHERE (id = ?1
+                            OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
+                            AND package_name = (SELECT package_name FROM packages WHERE id = ?1)))
+                       AND hub_category_manual = 1",
                     params![package_id],
                 ),
                 "author" => tx.execute(
@@ -3655,7 +3665,8 @@ pub async fn clear_override(
                        hub_author = hub_author_original,
                        hub_author_original = NULL,
                        hub_author_manual = 0
-                     WHERE creator = (SELECT creator FROM packages WHERE id = ?1)",
+                     WHERE creator = (SELECT creator FROM packages WHERE id = ?1)
+                       AND hub_author_manual = 1",
                     params![package_id],
                 ),
                 "type" => tx.execute(
@@ -3663,9 +3674,10 @@ pub async fn clear_override(
                        package_type = COALESCE(package_type_original, 'Unknown'),
                        package_type_original = NULL,
                        package_type_manual = 0
-                     WHERE id = ?1
-                       OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
-                       AND package_name = (SELECT package_name FROM packages WHERE id = ?1))",
+                     WHERE (id = ?1
+                            OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
+                            AND package_name = (SELECT package_name FROM packages WHERE id = ?1)))
+                       AND package_type_manual = 1",
                     params![package_id],
                 ),
                 "pin" => tx.execute(
@@ -3684,7 +3696,8 @@ pub async fn clear_override(
                         hub_match_method = NULL,
                         hub_sync_state   = NULL,
                         hub_synced_at    = ?2
-                     WHERE id = ?1",
+                     WHERE id = ?1
+                       AND hub_match_method IN ('manual', 'override')",
                     params![package_id, now],
                 ),
                 other => {
