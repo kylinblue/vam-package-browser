@@ -2378,8 +2378,6 @@ pub fn get_package_detail(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<PackageDetail, String> {
-    use std::io::Read;
-
     // 1. Fetch the package row + preview_path + var_path from DB.
     let (row, preview_path) = {
         let conn = state.db.lock();
@@ -2457,14 +2455,36 @@ pub fn get_package_detail(
         .map_err(|e| format!("package id {id}: {e}"))?
     };
 
-    // 2. Open zip read-only, parse meta.json, enumerate images.
+    // 2. Read meta + enumerate images. Branches on file (.var ZIP) vs
+    // directory (.var-named folder; VaM accepts either form).
     let var_path = std::path::PathBuf::from(&row.var_path);
+    let (content_list, dependencies, instructions, mut images) = if var_path.is_dir() {
+        read_detail_from_dir(&var_path).map_err(|e| format!("read dir {}: {e:#}", var_path.display()))?
+    } else {
+        read_detail_from_zip(&var_path).map_err(|e| format!("read zip {}: {e:#}", var_path.display()))?
+    };
+    let instructions = instructions.filter(|s| !s.trim().is_empty());
+    images.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(PackageDetail {
+        package: row,
+        content_list,
+        dependencies,
+        instructions,
+        images,
+        preview_path,
+    })
+}
+
+/// Parse meta + enumerate images from a .var ZIP file.
+fn read_detail_from_zip(
+    var_path: &std::path::Path,
+) -> anyhow::Result<(Vec<String>, Vec<String>, Option<String>, Vec<ImageEntry>)> {
+    use std::io::Read;
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .open(&var_path)
-        .map_err(|e| format!("open {}: {e}", var_path.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| format!("read zip {}: {e}", var_path.display()))?;
+        .open(var_path)?;
+    let mut zip = zip::ZipArchive::new(file)?;
 
     let (content_list, dependencies, instructions) = match zip.by_name("meta.json") {
         Ok(mut entry) => {
@@ -2482,7 +2502,6 @@ pub fn get_package_detail(
         }
         Err(_) => (vec![], vec![], None),
     };
-    let instructions = instructions.filter(|s| !s.trim().is_empty());
 
     let mut images: Vec<ImageEntry> = Vec::new();
     for i in 0..zip.len() {
@@ -2500,16 +2519,69 @@ pub fn get_package_detail(
             }
         }
     }
-    images.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((content_list, dependencies, instructions, images))
+}
 
-    Ok(PackageDetail {
-        package: row,
-        content_list,
-        dependencies,
-        instructions,
-        images,
-        preview_path,
-    })
+/// Same shape as `read_detail_from_zip` but for a `.var`-named directory
+/// (unpacked-archive form). meta.json read directly from disk; image
+/// enumeration via WalkDir; entry paths use forward-slash separators
+/// to match ZIP convention so downstream consumers (thumb protocol,
+/// detail UI) don't need to special-case the source type.
+fn read_detail_from_dir(
+    dir_path: &std::path::Path,
+) -> anyhow::Result<(Vec<String>, Vec<String>, Option<String>, Vec<ImageEntry>)> {
+    use walkdir::WalkDir;
+
+    // meta.json (case-insensitive lookup at the dir root).
+    let meta_path = WalkDir::new(dir_path)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| {
+            e.file_type().is_file()
+                && e.file_name()
+                    .to_str()
+                    .map(|s| s.eq_ignore_ascii_case("meta.json"))
+                    .unwrap_or(false)
+        })
+        .map(|e| e.into_path());
+
+    let (content_list, dependencies, instructions) = match meta_path {
+        Some(p) => {
+            let raw = std::fs::read(&p).unwrap_or_default();
+            let trimmed = if raw.len() >= 3 && &raw[..3] == [0xEF, 0xBB, 0xBF] {
+                &raw[3..]
+            } else {
+                &raw[..]
+            };
+            match crate::meta::parse_meta(trimmed) {
+                Ok(m) => (m.content_list, m.dependencies, m.instructions),
+                Err(_) => (vec![], vec![], None),
+            }
+        }
+        None => (vec![], vec![], None),
+    };
+
+    let mut images: Vec<ImageEntry> = Vec::new();
+    for entry in WalkDir::new(dir_path).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(dir_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let lower = rel_str.to_lowercase();
+        if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") {
+            let size = entry.metadata().map(|m| m.len() as i64).unwrap_or(0);
+            images.push(ImageEntry {
+                path: rel_str,
+                size,
+            });
+        }
+    }
+    Ok((content_list, dependencies, instructions, images))
 }
 
 #[derive(Debug, Serialize)]

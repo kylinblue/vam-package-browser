@@ -1049,6 +1049,9 @@ export default function App() {
             // already refreshed grid + aggregates if the load succeeded.)
             setSelectedIds(new Set());
             setSelectionAnchor(null);
+            // Refresh the toolbar "📦 N loaded" indicator. Without this,
+            // the count stays stale until next app launch / Ctrl+R.
+            refreshSetupState().catch(() => {});
           }}
         />
       )}

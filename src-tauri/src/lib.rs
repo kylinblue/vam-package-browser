@@ -285,26 +285,14 @@ fn read_zip_entry(
     entry_path: &str,
     max_bytes: u64,
 ) -> anyhow::Result<Vec<u8>> {
-    use std::io::Read;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(var_path)
-        .map_err(|e| anyhow::anyhow!("open {var_path}: {e}"))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| anyhow::anyhow!("read zip {var_path}: {e}"))?;
-    let mut entry = zip
-        .by_name(entry_path)
-        .map_err(|e| anyhow::anyhow!("zip entry {entry_path}: {e}"))?;
-    if entry.size() > max_bytes {
-        anyhow::bail!(
-            "source image too large ({} bytes, cap {}) — skipped",
-            entry.size(),
-            max_bytes
-        );
-    }
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    // Branch on .var-as-file vs .var-as-directory (VaM accepts both).
+    // Shared helper in thumbnails handles the same dispatch for thumb
+    // generation; route through it here so the two stay in sync.
+    thumbnails::read_entry_bytes(
+        std::path::Path::new(var_path),
+        entry_path,
+        max_bytes,
+    )
 }
 
 fn bad_request() -> Response<Cow<'static, [u8]>> {

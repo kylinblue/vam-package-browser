@@ -4,6 +4,7 @@ import {
   createPreset,
   deletePreset,
   getPreset,
+  listCreators,
   listCreatorsForPackages,
   listPresets,
   loadVisibility,
@@ -196,6 +197,28 @@ export function LoadVisibilityModal({
     [refreshPresets, onActionResult],
   );
 
+  const handleLoadAll = useCallback(async () => {
+    setBusy(true);
+    try {
+      const creators = await listCreators();
+      // Empty creator list (e.g. unscanned library) falls through to the
+      // empty-seeds → unload-all branch, which is the sensible no-op.
+      if (creators.length === 0) {
+        setActiveSeeds(null);
+      } else {
+        setActiveSeeds({ creators, package_ids: [] });
+      }
+    } catch (e) {
+      onActionResult({ kind: "error", text: `Load all failed: ${e}` });
+    } finally {
+      setBusy(false);
+    }
+  }, [onActionResult]);
+
+  const handleUnloadAllSeeds = useCallback(() => {
+    setActiveSeeds(null);
+  }, []);
+
   const handleSavePreset = useCallback(async () => {
     const name = saveDraftName.trim();
     if (!name) return;
@@ -242,6 +265,30 @@ export function LoadVisibilityModal({
     <div style={overlayStyle} role="dialog" aria-modal="true">
       <div style={cardStyle}>
         <h2 style={headingStyle}>Visibility — load / unload</h2>
+
+        <div style={quickActionsStyle}>
+          <button
+            type="button"
+            style={quickActionButtonStyle}
+            onClick={handleLoadAll}
+            disabled={busy}
+            title="Set the target to the entire library (every author). Closure pulls in deps automatically."
+          >
+            Load all
+          </button>
+          <button
+            type="button"
+            style={quickActionButtonStyle}
+            onClick={handleUnloadAllSeeds}
+            disabled={busy}
+            title="Set the target to nothing — every currently-loaded package will be unlinked on Apply."
+          >
+            Unload all
+          </button>
+          <span style={quickActionsHelpStyle}>
+            …or pick a preset, or commit your current selection below.
+          </span>
+        </div>
 
         {presets.length > 0 && (
           <PresetsSection
@@ -836,4 +883,30 @@ const saveInputStyle: React.CSSProperties = {
   border: "1px solid var(--border)",
   borderRadius: 4,
   padding: "6px 8px",
+};
+
+const quickActionsStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 6,
+  alignItems: "center",
+  marginBottom: 12,
+  padding: "8px 10px",
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+};
+
+const quickActionButtonStyle: React.CSSProperties = {
+  background: "var(--bg-elev)",
+  color: "var(--fg)",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+  padding: "4px 12px",
+  cursor: "pointer",
+  fontWeight: 600,
+};
+
+const quickActionsHelpStyle: React.CSSProperties = {
+  color: "var(--fg-dim)",
+  fontSize: 12,
 };
