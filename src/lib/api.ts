@@ -463,3 +463,71 @@ export async function getPackageRelationships(
 export async function resolveDependencies(): Promise<void> {
   return invoke("resolve_dependencies");
 }
+
+// ─── Hub pin / category override ──────────────────────────────────────────
+
+/** Outcome of a single package's pin attempt. Backend returns one entry
+ *  per requested package id, even when most fail in the same way (e.g.
+ *  URL parse error — every id gets a UrlParseError result so the UI can
+ *  show a uniform per-row table). */
+export type PinStatus =
+  | "ok"
+  | "url_parse_error"
+  | "not_found"
+  | "probe_failed"
+  | "package_missing"
+  | "db_error";
+
+export interface PinResult {
+  package_id: number;
+  /** "manual" or "override" on success, null on any failure. */
+  method: "manual" | "override" | null;
+  status: PinStatus;
+  /** Short human-readable context for non-ok rows (e.g. error message
+   *  from the HEAD probe). Frontend may surface in the toast. */
+  detail: string | null;
+}
+
+export interface PinReport {
+  results: PinResult[];
+  /** Aggregate propagation counts across all per-package writes. */
+  siblings_updated: number;
+  authors_updated: number;
+  /** Convenience flag for the toast — true iff ≥1 row was pinned. */
+  any_succeeded: boolean;
+}
+
+/** Manually pin one or more local packages to a hub resource. Accepts any
+ *  of: full URL, /resources/<slug>.<id>/ path (with or without subpath /
+ *  query), bare `<slug>.<id>`, or bare numeric id.
+ *
+ *  Backend validates with a single HEAD probe (resource-level, not
+ *  per-package) before any DB write. On success each package gets
+ *  hub_resource_id + hub_url + hub_match_method ('manual' if no prior
+ *  match, 'override' otherwise), and `propagate_hub_match` fires from
+ *  that row. Other hub_* metadata is filled in by the next hub-sync. */
+export async function setHubPin(
+  packageIds: number[],
+  hubUrl: string,
+): Promise<PinReport> {
+  return invoke<PinReport>("set_hub_pin", { packageIds, hubUrl });
+}
+
+export interface CategoryReport {
+  /** Rows the caller explicitly selected that got their category set. */
+  directly_updated: number;
+  /** Sibling rows (same creator+package_name) updated via propagation —
+   *  unconditional propagation in this case, since the user explicitly
+   *  declared a category for the package family. */
+  siblings_updated: number;
+}
+
+/** Bulk-override hub_category for selected packages. Sets the
+ *  `hub_category_manual` flag so subsequent hub-syncs leave the override
+ *  alone. Does NOT touch hub_match_method — this isn't a re-pin. */
+export async function setHubCategory(
+  packageIds: number[],
+  category: string,
+): Promise<CategoryReport> {
+  return invoke<CategoryReport>("set_hub_category", { packageIds, category });
+}

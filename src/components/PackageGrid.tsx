@@ -50,6 +50,16 @@ interface Props {
    *  package has been matched on the hub; falls back to heuristic per-tile
    *  for unmatched packages so the grid stays populated. */
   displayMode?: "heuristic" | "hub";
+  /** Group-select state. When `selectionMode` is true, primary clicks toggle
+   *  selection instead of opening the detail view, and a checkbox overlay
+   *  becomes visible on every tile. Outside select mode, Ctrl/Meta-click on
+   *  a tile still toggles selection (power-user path), and Shift-click does
+   *  range-select from the last clicked tile.
+   *  `onToggleSelect(id, additive, range)` — `additive=false` clears prior
+   *  selection; `range=true` requests a range fill from the last anchor. */
+  selectionMode: boolean;
+  selectedIds: Set<number>;
+  onToggleSelect: (id: number, additive: boolean, range: boolean) => void;
 }
 
 function formatSize(bytes: number): string {
@@ -79,6 +89,9 @@ export function PackageGrid({
   onFilterByType,
   onViewportWidth,
   displayMode = "heuristic",
+  selectionMode,
+  selectedIds,
+  onToggleSelect,
 }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -176,6 +189,9 @@ export function PackageGrid({
                   onOpenDetail={onOpenDetail}
                   onFilterByAuthor={onFilterByAuthor}
                   onFilterByType={onFilterByType}
+                  selectionMode={selectionMode}
+                  isSelected={selectedIds.has(pkg.id)}
+                  onToggleSelect={onToggleSelect}
                 />
               ))}
             </div>
@@ -215,6 +231,9 @@ interface TileProps {
   onOpenDetail: (id: number) => void;
   onFilterByAuthor: (author: string) => void;
   onFilterByType: (type: string) => void;
+  selectionMode: boolean;
+  isSelected: boolean;
+  onToggleSelect: (id: number, additive: boolean, range: boolean) => void;
 }
 
 function Tile({
@@ -227,6 +246,9 @@ function Tile({
   onOpenDetail,
   onFilterByAuthor,
   onFilterByType,
+  selectionMode,
+  isSelected,
+  onToggleSelect,
 }: TileProps) {
   const filename = pkg.var_path.split(/[\\/]/).pop() ?? pkg.var_path;
   // Hub-mode overrides: prefer hub_title / hub_category when available;
@@ -348,16 +370,52 @@ function Tile({
     if (pkg.error) return;
     // Don't open detail when the click is on an action button (favorite/hide).
     if ((e.target as HTMLElement).closest("button")) return;
+
+    const ctrlOrMeta = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+
+    // Modifier-driven selection works in any mode. Shift requests a range
+    // fill from the last clicked anchor (App-level state).
+    if (ctrlOrMeta || shift) {
+      e.preventDefault();
+      onToggleSelect(pkg.id, true, shift);
+      return;
+    }
+
+    // Plain click in select mode: toggle this one, keep prior selections.
+    if (selectionMode) {
+      onToggleSelect(pkg.id, true, false);
+      return;
+    }
+
+    // Default: open detail.
     onOpenDetail(pkg.id);
   };
 
+  const tileClass = [
+    "tile",
+    isHubGhost ? "tile-hub-ghost" : "",
+    isSelected ? "tile-selected" : "",
+    selectionMode ? "tile-select-mode" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div
-      className={`tile ${isHubGhost ? "tile-hub-ghost" : ""}`}
+      className={tileClass}
       title={fullTitle}
       onClick={onClick}
       onContextMenu={onContextMenu}
     >
+      {(selectionMode || isSelected) && (
+        <div
+          className={`tile-select-mark ${isSelected ? "tile-select-mark-on" : ""}`}
+          aria-label={isSelected ? "Selected" : "Not selected"}
+        >
+          {isSelected ? "✓" : ""}
+        </div>
+      )}
       {menuPos && (
         <ContextMenu
           x={menuPos.x}

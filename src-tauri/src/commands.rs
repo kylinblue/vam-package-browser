@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::embedding::{self, InputKind, ModelChoice};
+use crate::propagation;
 use crate::{hub, index, scanner, thumbnails, AppState};
 
 /// Default model/input variant for semantic search. Per the embedding
@@ -807,19 +808,21 @@ fn sync_one_creator(
         let r = tx.execute(
             "UPDATE packages SET
                hub_resource_id    = ?2,
-               hub_url            = ?3,
-               hub_title          = ?4,
-               hub_author         = ?5,
-               hub_category       = ?6,
-               hub_preview_url    = ?7,
-               hub_synced_at      = ?8,
-               hub_sync_state     = ?9,
-               hub_billing_tier   = ?10,
-               hub_is_hub_hosted  = ?11,
-               hub_license        = ?12,
-               hub_lastmod        = ?13,
-               hub_external_url   = ?14,
-               hub_match_method   = ?15
+               hub_url             = ?3,
+               hub_title           = ?4,
+               hub_author          = ?5,
+               hub_category        = CASE WHEN hub_category_manual = 1
+                                          THEN hub_category
+                                          ELSE ?6 END,
+               hub_preview_url     = ?7,
+               hub_synced_at       = ?8,
+               hub_sync_state      = ?9,
+               hub_billing_tier    = ?10,
+               hub_is_hub_hosted   = ?11,
+               hub_license         = ?12,
+               hub_lastmod         = ?13,
+               hub_external_url    = ?14,
+               hub_match_method    = ?15
              WHERE id = ?1",
             params![
                 local.id,
@@ -853,6 +856,20 @@ fn sync_one_creator(
                     "matched" => {
                         c.matched += 1;
                         c.done += 1;
+                        drop(c);
+                        // Propagate this freshly-matched row to its
+                        // package-wide siblings + author-wide rows. The
+                        // helper's strict guard skips already-confirmed
+                        // siblings, so re-syncs don't re-trigger no-op
+                        // propagation. Non-fatal if it fails.
+                        if let Err(e) =
+                            propagation::propagate_hub_match(&tx, local.id)
+                        {
+                            eprintln!(
+                                "hub sync B1 propagate failed for id {}: {e:#}",
+                                local.id
+                            );
+                        }
                     }
                     _ => {
                         c.not_found += 1;
@@ -1212,19 +1229,21 @@ fn retry_one_keyword(
         let r = conn.execute(
             "UPDATE packages SET
                hub_resource_id    = ?2,
-               hub_url            = ?3,
-               hub_title          = ?4,
-               hub_author         = ?5,
-               hub_category       = ?6,
-               hub_preview_url    = ?7,
-               hub_synced_at      = ?8,
-               hub_sync_state     = ?9,
-               hub_billing_tier   = ?10,
-               hub_is_hub_hosted  = ?11,
-               hub_license        = ?12,
-               hub_lastmod        = ?13,
-               hub_external_url   = ?14,
-               hub_match_method   = ?15
+               hub_url             = ?3,
+               hub_title           = ?4,
+               hub_author          = ?5,
+               hub_category        = CASE WHEN hub_category_manual = 1
+                                          THEN hub_category
+                                          ELSE ?6 END,
+               hub_preview_url     = ?7,
+               hub_synced_at       = ?8,
+               hub_sync_state      = ?9,
+               hub_billing_tier    = ?10,
+               hub_is_hub_hosted   = ?11,
+               hub_license         = ?12,
+               hub_lastmod         = ?13,
+               hub_external_url    = ?14,
+               hub_match_method    = ?15
              WHERE id = ?1",
             params![
                 local.id,
@@ -1247,10 +1266,20 @@ fn retry_one_keyword(
         match r {
             Ok(_) => {
                 // Flip the counter: this was previously not_found, now matched.
-                let mut c = counters.lock();
-                c.matched += 1;
-                if c.not_found > 0 {
-                    c.not_found -= 1;
+                {
+                    let mut c = counters.lock();
+                    c.matched += 1;
+                    if c.not_found > 0 {
+                        c.not_found -= 1;
+                    }
+                }
+                // Propagate from this freshly-matched row. Helper's guard
+                // protects already-confirmed siblings.
+                if let Err(e) = propagation::propagate_hub_match(&conn, local.id) {
+                    eprintln!(
+                        "hub sync B2 propagate failed for id {}: {e:#}",
+                        local.id
+                    );
                 }
             }
             Err(e) => {
@@ -1425,9 +1454,28 @@ pub async fn start_hub_sync(
         let locals: Vec<LocalPkg> = {
             let conn = db.lock();
             let mut clauses: Vec<&'static str> = vec!["creator <> ''"];
+            // User-driven matches are off-limits to auto-sync — protect
+            // them regardless of the `only_missing` setting. Filtering at
+            // the locals query (instead of guarding each UPDATE) keeps the
+            // sync-loop counters honest: skipped rows never enter the queue.
+            clauses.push(
+                "(hub_match_method IS NULL OR hub_match_method NOT IN ('manual', 'override'))",
+            );
             if options.only_missing {
+                // Include rows that:
+                //   - have never been synced, OR
+                //   - aren't currently in the 'matched' state, OR
+                //   - are currently inherited (need verification — the
+                //     match was propagated from a sibling, not directly
+                //     established for this row's actual .var filename).
+                // The verification happens naturally: the sync's filename
+                // pass either confirms the inherited resource_id or
+                // overwrites it with the correct match.
                 clauses.push(
-                    "(hub_synced_at IS NULL OR hub_sync_state IS NULL OR hub_sync_state <> 'matched')",
+                    "(hub_synced_at IS NULL \
+                      OR hub_sync_state IS NULL \
+                      OR hub_sync_state <> 'matched' \
+                      OR hub_match_method = 'inherit')",
                 );
             }
             let mut binds: Vec<rusqlite::types::Value> = Vec::new();
@@ -2904,4 +2952,422 @@ pub fn get_packages_by_ids(
     // (e.g. deleted between calls). `remove` consumes the row out of the
     // HashMap so PackageRow doesn't need to be Clone.
     Ok(ids.into_iter().filter_map(|id| rows.remove(&id)).collect())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Hub pin / category override (user-driven hub_* writes + propagation)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse user-supplied hub identifier — accepts any of:
+///   - Full URL: `https://hub.virtamate.com/resources/forest-assetbundle.37103/`
+///   - Path: `/resources/forest-assetbundle.37103/`
+///   - Resource path with subpath: `/resources/forest-assetbundle.37103/updates`
+///   - Bare slug + id: `forest-assetbundle.37103`
+///   - Bare numeric id: `37103`
+///
+/// Walks path segments right-to-left looking for the `slug.<id>` pattern,
+/// so query strings, fragments, and trailing subpaths don't break parsing.
+/// For bare numeric input we use `_` as the slug placeholder — XF redirects
+/// to the canonical URL on lookup so the slug is informational only.
+fn parse_hub_pin_input(input: &str) -> Option<(String, i64)> {
+    let trimmed = input.trim();
+    // Drop query/fragment if present (`?foo=bar`, `#anchor`).
+    let trimmed = trimmed.split(&['?', '#'][..]).next().unwrap_or(trimmed);
+
+    // Bare numeric id.
+    if let Ok(id) = trimmed.parse::<i64>() {
+        if id > 0 {
+            return Some(("_".to_string(), id));
+        }
+    }
+    // Walk path segments right-to-left looking for `slug.<id>`.
+    for seg in trimmed.trim_matches('/').rsplit('/') {
+        if let Some(dot) = seg.rfind('.') {
+            if let Ok(id) = seg[dot + 1..].parse::<i64>() {
+                if id > 0 && !seg[..dot].is_empty() {
+                    return Some((seg[..dot].to_string(), id));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinStatus {
+    /// Pin applied + propagation fired.
+    Ok,
+    /// Could not parse the URL/ID input. No DB write occurred.
+    UrlParseError,
+    /// HEAD probe returned 404. No DB write occurred.
+    NotFound,
+    /// HEAD probe failed for transport reasons (timeout, DNS, etc.).
+    ProbeFailed,
+    /// Package id didn't resolve to a row.
+    PackageMissing,
+    /// SQL error during write.
+    DbError,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PinResult {
+    pub package_id: i64,
+    /// "manual" or "override" on success, None on any failure.
+    pub method: Option<String>,
+    pub status: PinStatus,
+    /// Brief context the UI can include in the toast for non-ok cases.
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct PinReport {
+    pub results: Vec<PinResult>,
+    /// Sum across all per-package propagation reports.
+    pub siblings_updated: i64,
+    pub authors_updated: i64,
+    /// True iff at least one row was successfully pinned. Gates the
+    /// success toast in the UI.
+    pub any_succeeded: bool,
+}
+
+/// Manually pin one or more local packages to a hub resource.
+///
+/// Accepts canonical URL, bare slug+id, or bare numeric id (see
+/// `parse_hub_pin_input`). Validates by HEAD-probing the resource once
+/// (per-resource, not per-package — so N packages = 1 probe).
+///
+/// Write semantics per package:
+///   - Always writes: hub_resource_id, hub_url, hub_sync_state='matched',
+///     hub_synced_at=now, hub_match_method.
+///   - hub_match_method: 'manual' if prior was NULL, else 'override' —
+///     the latter signals "user corrected a prior auto-match".
+///   - Other hub_* fields (title, author, category, license, billing_tier,
+///     preview_url, lastmod, external_url) are NOT fetched here. The next
+///     hub-sync pass refreshes metadata for manual/override pins via a
+///     per-resource lookup path (see task #15 — wires the existing
+///     search-by-creator flow into a refresh mode).
+///
+/// Each successful write triggers `propagate_hub_match` from that row.
+/// Returns per-package status plus aggregate propagation counts.
+#[tauri::command]
+pub async fn set_hub_pin(
+    state: State<'_, AppState>,
+    package_ids: Vec<i64>,
+    hub_url: String,
+) -> Result<PinReport, String> {
+    if package_ids.is_empty() {
+        return Err("no package ids supplied".to_string());
+    }
+    let Some((slug, resource_id)) = parse_hub_pin_input(&hub_url) else {
+        // Synthesize a per-package failure so the UI can show a uniform
+        // result table regardless of failure mode.
+        return Ok(PinReport {
+            results: package_ids
+                .iter()
+                .map(|&id| PinResult {
+                    package_id: id,
+                    method: None,
+                    status: PinStatus::UrlParseError,
+                    detail: Some(format!("could not parse: {hub_url}")),
+                })
+                .collect(),
+            ..Default::default()
+        });
+    };
+
+    let db = state.db.clone();
+    let canonical_url = format!(
+        "https://hub.virtamate.com/resources/{slug}.{resource_id}/"
+    );
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<PinReport, String> {
+        // ── Single HEAD probe to validate the resource exists. The probe
+        // outcome answers per-resource, so we don't repeat it per package.
+        let client = hub::HubClient::new();
+        let probe = match client.head_download(&slug, resource_id) {
+            Ok(p) => p,
+            Err(e) => {
+                let detail = Some(format!("HEAD failed: {e:#}"));
+                return Ok(PinReport {
+                    results: package_ids
+                        .iter()
+                        .map(|&id| PinResult {
+                            package_id: id,
+                            method: None,
+                            status: PinStatus::ProbeFailed,
+                            detail: detail.clone(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                });
+            }
+        };
+        if matches!(probe, hub::DownloadProbe::NotFound) {
+            let detail = Some(format!("resource {resource_id} returned 404"));
+            return Ok(PinReport {
+                results: package_ids
+                    .iter()
+                    .map(|&id| PinResult {
+                        package_id: id,
+                        method: None,
+                        status: PinStatus::NotFound,
+                        detail: detail.clone(),
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
+        // Note: we accept BOTH Hosted (hub-hosted .var) and Offsite (paid
+        // / external) probes as valid pins. The user chose this resource;
+        // not our place to reject pay-walled or external resources.
+
+        let now = unix_now();
+        let mut conn = db.lock();
+        let tx = conn.transaction().map_err(|e| format!("tx open: {e}"))?;
+        let mut report = PinReport::default();
+
+        for &package_id in &package_ids {
+            // Read prior method to decide manual vs override. None = row
+            // missing entirely; Some(None) = row exists, no prior method.
+            let prior: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT hub_match_method FROM packages WHERE id = ?1",
+                    params![package_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            let prior_method = match prior {
+                None => {
+                    report.results.push(PinResult {
+                        package_id,
+                        method: None,
+                        status: PinStatus::PackageMissing,
+                        detail: None,
+                    });
+                    continue;
+                }
+                Some(m) => m,
+            };
+            // 'manual' iff there was no prior method at all. Anything else
+            // (filename/fuzzy_title/manual/override/inherit) → 'override',
+            // which carries the "user-corrected" semantics. Re-pinning a
+            // 'manual' row doesn't strictly need to promote to 'override',
+            // but doing so simplifies the state machine: once user-touched,
+            // it's an override on every subsequent re-pin.
+            let new_method = if prior_method.is_none() {
+                "manual"
+            } else {
+                "override"
+            };
+
+            let r = tx.execute(
+                "UPDATE packages SET
+                   hub_resource_id  = ?1,
+                   hub_url          = ?2,
+                   hub_synced_at    = ?3,
+                   hub_sync_state   = 'matched',
+                   hub_match_method = ?4
+                 WHERE id = ?5",
+                params![resource_id, &canonical_url, now, new_method, package_id],
+            );
+            match r {
+                Ok(1) => {
+                    // Propagate from this freshly-pinned row. The helper's
+                    // strict guard skips already-confirmed siblings.
+                    match propagation::propagate_hub_match(&tx, package_id) {
+                        Ok(pr) => {
+                            report.siblings_updated += pr.siblings_updated;
+                            report.authors_updated += pr.authors_updated;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "set_hub_pin: propagate failed for id {package_id}: {e:#}"
+                            );
+                        }
+                    }
+                    report.any_succeeded = true;
+                    report.results.push(PinResult {
+                        package_id,
+                        method: Some(new_method.to_string()),
+                        status: PinStatus::Ok,
+                        detail: None,
+                    });
+                }
+                Ok(_) => {
+                    report.results.push(PinResult {
+                        package_id,
+                        method: None,
+                        status: PinStatus::DbError,
+                        detail: Some("update affected 0 rows".to_string()),
+                    });
+                }
+                Err(e) => {
+                    report.results.push(PinResult {
+                        package_id,
+                        method: None,
+                        status: PinStatus::DbError,
+                        detail: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| format!("tx commit: {e}"))?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct CategoryReport {
+    /// Rows the user explicitly selected that got their category updated.
+    pub directly_updated: i64,
+    /// Sibling rows (same creator+package_name) that picked up the
+    /// override via propagation. Sibling propagation here is broader than
+    /// `propagate_hub_match`'s NULL|inherit guard — the user explicitly
+    /// declared a category for this package, which applies across versions
+    /// regardless of whether siblings have confirmed hub matches.
+    pub siblings_updated: i64,
+}
+
+/// Bulk-override `hub_category` for one or more local packages. Sets
+/// `hub_category_manual = 1` so the next hub-sync pass leaves the
+/// category alone — this protects the user's correction from being
+/// silently undone.
+///
+/// Does NOT touch `hub_match_method`. The pin (the resource link itself)
+/// is unchanged; only the displayed category is corrected.
+///
+/// Propagation: ALL sibling versions (same creator+package_name) receive
+/// the same category + manual flag, even if they have confirmed hub
+/// matches. The user has expressed intent for this package family as a
+/// whole. (Contrast with `propagate_hub_match`, which preserves confirmed
+/// hub matches' own categories — that's correct for resource linkage but
+/// wrong here, where the user is overruling the category itself.)
+#[tauri::command]
+pub async fn set_hub_category(
+    state: State<'_, AppState>,
+    package_ids: Vec<i64>,
+    category: String,
+) -> Result<CategoryReport, String> {
+    if package_ids.is_empty() {
+        return Err("no package ids supplied".to_string());
+    }
+    let category = category.trim().to_string();
+    if category.is_empty() {
+        return Err("category cannot be empty".to_string());
+    }
+    let db = state.db.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<CategoryReport, String> {
+        let mut conn = db.lock();
+        let tx = conn.transaction().map_err(|e| format!("tx open: {e}"))?;
+        let mut report = CategoryReport::default();
+
+        for &package_id in &package_ids {
+            let r = tx.execute(
+                "UPDATE packages
+                 SET hub_category = ?1, hub_category_manual = 1
+                 WHERE id = ?2",
+                params![&category, package_id],
+            );
+            match r {
+                Ok(1) => {
+                    report.directly_updated += 1;
+                    // Sibling propagation. Unlike propagate_hub_match this
+                    // is unconditional — see this command's doc comment.
+                    let prop = tx.execute(
+                        "UPDATE packages
+                         SET hub_category = ?1, hub_category_manual = 1
+                         WHERE id != ?2
+                           AND creator      = (SELECT creator      FROM packages WHERE id = ?2)
+                           AND package_name = (SELECT package_name FROM packages WHERE id = ?2)",
+                        params![&category, package_id],
+                    );
+                    match prop {
+                        Ok(n) => report.siblings_updated += n as i64,
+                        Err(e) => eprintln!(
+                            "set_hub_category: sibling propagate failed for id {package_id}: {e}"
+                        ),
+                    }
+                }
+                Ok(_) => {
+                    eprintln!("set_hub_category: id {package_id} not found");
+                }
+                Err(e) => {
+                    eprintln!("set_hub_category: id {package_id} failed: {e}");
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| format!("tx commit: {e}"))?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(test)]
+mod pin_input_tests {
+    use super::parse_hub_pin_input;
+
+    #[test]
+    fn parses_full_url() {
+        let r = parse_hub_pin_input(
+            "https://hub.virtamate.com/resources/forest-assetbundle.37103/",
+        );
+        assert_eq!(r, Some(("forest-assetbundle".into(), 37103)));
+    }
+    #[test]
+    fn parses_path_only() {
+        let r = parse_hub_pin_input("/resources/forest-assetbundle.37103/");
+        assert_eq!(r, Some(("forest-assetbundle".into(), 37103)));
+    }
+    #[test]
+    fn parses_path_with_subpath() {
+        let r = parse_hub_pin_input("/resources/forest-assetbundle.37103/updates");
+        assert_eq!(r, Some(("forest-assetbundle".into(), 37103)));
+    }
+    #[test]
+    fn parses_query_string() {
+        let r = parse_hub_pin_input("/resources/forest-assetbundle.37103/?ref=share");
+        assert_eq!(r, Some(("forest-assetbundle".into(), 37103)));
+    }
+    #[test]
+    fn parses_bare_slug_id() {
+        let r = parse_hub_pin_input("forest-assetbundle.37103");
+        assert_eq!(r, Some(("forest-assetbundle".into(), 37103)));
+    }
+    #[test]
+    fn parses_bare_numeric_id() {
+        let r = parse_hub_pin_input("37103");
+        assert_eq!(r, Some(("_".into(), 37103)));
+    }
+    #[test]
+    fn parses_trimmed_whitespace() {
+        let r = parse_hub_pin_input("  37103  ");
+        assert_eq!(r, Some(("_".into(), 37103)));
+    }
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(parse_hub_pin_input(""), None);
+        assert_eq!(parse_hub_pin_input("not-a-url"), None);
+        assert_eq!(parse_hub_pin_input("/resources/categories/looks.5/"), Some(("looks".into(), 5)));
+        // ^ acceptable false positive — categories pages have the same
+        //   shape and the user wouldn't typically paste one. HEAD probe
+        //   will reject (categories/<n> isn't a resource id) so no bad
+        //   write happens.
+        assert_eq!(parse_hub_pin_input("0"), None);
+        assert_eq!(parse_hub_pin_input("-5"), None);
+    }
+    #[test]
+    fn picks_innermost_slug_id_in_nested_path() {
+        // Walks right-to-left, so the innermost slug.id wins over an
+        // outer one. Real hub URLs never nest like this, but the parser
+        // should be deterministic.
+        let r = parse_hub_pin_input("/resources/outer.111/inner.222/");
+        assert_eq!(r, Some(("inner".into(), 222)));
+    }
 }

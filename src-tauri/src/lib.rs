@@ -4,6 +4,7 @@ pub mod embedding;
 mod hub;
 pub mod index;
 pub mod meta;
+pub mod propagation;
 mod scanner;
 pub mod tagging;
 pub mod thumbnails;
@@ -152,6 +153,8 @@ pub fn run() {
             commands::hub_debug_dump,
             commands::hub_debug_search,
             commands::hub_debug_fetch,
+            commands::set_hub_pin,
+            commands::set_hub_category,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

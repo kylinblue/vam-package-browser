@@ -5,6 +5,7 @@ import { DetailView } from "./components/DetailView";
 import { FacetPanel } from "./components/FacetPanel";
 import { HubSyncView } from "./components/HubSyncView";
 import { PackageGrid } from "./components/PackageGrid";
+import { SelectionActionBar } from "./components/SelectionActionBar";
 import { StatsPanel } from "./components/StatsPanel";
 import { TypeChips } from "./components/TypeChips";
 import {
@@ -76,6 +77,18 @@ export default function App() {
   const [statsPanelVisible, setStatsPanelVisible] = useState<boolean>(
     () => localStorage.getItem("statsPanelVisible") === "1",
   );
+
+  // ── Group select ──────────────────────────────────────────────────────────
+  // `selectionMode` flips primary-click behavior to "toggle select" instead
+  // of "open detail". Modifier-driven select (Ctrl / Shift) works in either
+  // mode. Selection survives mode toggling so the user can dip out, refine
+  // filters, then continue selecting.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Last id that received a non-shift click. Shift-range fills from anchor
+  // to the next target. Null when no anchor has been set yet (or it's been
+  // filtered out of the visible packages — see toggleSelect's degradation).
+  const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
 
   // Size + date range filter inputs are kept as raw strings; empty = no bound.
   const [minSizeMb, setMinSizeMb] = useState("");
@@ -185,6 +198,40 @@ export default function App() {
       return true;
     });
   }, [packages, errorsOnly, includeHidden, favoritesOnly]);
+
+  // Tile click → selection mutator. Behavior:
+  //   range=true (Shift)        — fill from selectionAnchor to id in the
+  //                                current visiblePackages order. If the
+  //                                anchor isn't in the view (e.g. filter
+  //                                changed since), degrade to a plain
+  //                                toggle on `id`.
+  //   additive=false            — replace prior selection with just `id`.
+  //   default                   — toggle `id` on/off; keep other selections.
+  // Only non-range clicks update the anchor.
+  const toggleSelect = useCallback(
+    (id: number, additive: boolean, range: boolean) => {
+      setSelectedIds((prev) => {
+        if (range && selectionAnchor !== null) {
+          const ids = visiblePackages.map((p) => p.id);
+          const a = ids.indexOf(selectionAnchor);
+          const b = ids.indexOf(id);
+          if (a >= 0 && b >= 0) {
+            const [lo, hi] = a < b ? [a, b] : [b, a];
+            const next = new Set(additive ? prev : []);
+            for (let i = lo; i <= hi; i++) next.add(ids[i]);
+            return next;
+          }
+          // Anchor scrolled out of view — fall through to plain toggle.
+        }
+        const next = new Set(additive ? prev : []);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      if (!range) setSelectionAnchor(id);
+    },
+    [visiblePackages, selectionAnchor],
+  );
 
   const loadResults = useCallback(async () => {
     setLoading(true);
@@ -511,6 +558,14 @@ export default function App() {
             />
             <span>📊 Stats</span>
           </label>
+          <label className="toolbar-toggle">
+            <input
+              type="checkbox"
+              checked={selectionMode}
+              onChange={(e) => setSelectionMode(e.target.checked)}
+            />
+            <span>📋 Select{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}</span>
+          </label>
 
           <label className="toolbar-sort">
             <span>Sort</span>
@@ -666,6 +721,9 @@ export default function App() {
           onFilterByAuthor={setSelectedCreator}
           onFilterByType={(t) => setSelectedType(t as PackageType)}
           onViewportWidth={setViewportWidth}
+          selectionMode={selectionMode}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
         />
         {statsPanelVisible && (
           <StatsPanel
@@ -699,6 +757,23 @@ export default function App() {
             setDetailPackageId(null);
           }}
           onOpenPackage={setDetailPackageId}
+        />
+      )}
+
+      {selectedIds.size > 0 && (
+        <SelectionActionBar
+          selection={[...selectedIds]}
+          onClear={() => {
+            setSelectedIds(new Set());
+            setSelectionAnchor(null);
+          }}
+          onActionApplied={() => {
+            // Pull a fresh result set + aggregates after the backend
+            // applied a bulk action. Selection is left intact so the user
+            // can stack further actions on the same set if they want.
+            loadResults();
+            refreshTypeCountsAndCreators();
+          }}
         />
       )}
 

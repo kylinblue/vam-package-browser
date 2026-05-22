@@ -71,7 +71,27 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v14_to_v15(&conn)?;
         conn.pragma_update(None, "user_version", 15)?;
     }
+    if current < 16 {
+        migrate_v15_to_v16(&conn)?;
+        conn.pragma_update(None, "user_version", 16)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
+    // User-driven category overrides need provenance so the next hub-sync
+    // pass doesn't stomp them. `hub_category_manual = 1` means "leave
+    // hub_category alone, the user set it" — writers in the sync flow
+    // honor this with a CASE expression instead of an unconditional
+    // overwrite.
+    //
+    // Stored as INTEGER (0/1) rather than TEXT for cheap WHERE filters.
+    conn.execute_batch(
+        r#"
+        ALTER TABLE packages ADD COLUMN hub_category_manual INTEGER DEFAULT 0;
+        "#,
+    )?;
+    Ok(())
 }
 
 fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
@@ -79,10 +99,22 @@ fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
     // that paid resources expose their offsite URL via the 301 Location
     // header on /resources/.../download (capture that as hub_external_url),
     // and that we need to distinguish how each pin was made for UI
-    // transparency (hub_match_method: 'filename' | 'fuzzy_title' | 'manual').
-    // These could not be folded back into v14 without breaking installs that
-    // already applied the original 4-column v14 — adding them in a fresh
-    // migration is the clean fix.
+    // transparency.
+    //
+    // Reserved hub_match_method values (v16+):
+    //   'filename'    — auto: exact .var filename matched a hub-hosted CDN
+    //                   filename.
+    //   'fuzzy_title' — auto: paid-fallback fuzzy title match.
+    //   'manual'      — user pinned a package that had NO prior hub match.
+    //   'override'    — user pinned a package whose prior match was
+    //                   filename / fuzzy_title (user-corrected an auto-match).
+    //   'inherit'     — propagated from a sibling row (same creator +
+    //                   package_name OR same creator's hub_author backfill).
+    //                   Subject to background verification.
+    //
+    // Auto-sync writers MUST NOT overwrite rows whose hub_match_method is
+    // 'manual' or 'override' — both protect user intent. 'inherit' is fair
+    // game (verification may demote it back to NULL).
     conn.execute_batch(
         r#"
         ALTER TABLE packages ADD COLUMN hub_external_url TEXT;

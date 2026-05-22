@@ -6,6 +6,8 @@ import {
   HUGE_IMAGE_BYTES,
   openExternalUrl,
   revealInFolder,
+  setHubCategory,
+  setHubPin,
   subThumbUrl,
   thumbUrl,
   vamHubAuthorSearchUrl,
@@ -71,6 +73,10 @@ export function DetailView({
   const [error, setError] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [hoveredImage, setHoveredImage] = useState<string | null>(null);
+  // Bumped after a hub pin / category override succeeds to re-fetch the
+  // package detail with updated hub_* fields. Avoids stale data after the
+  // user performs an inline action.
+  const [reloadCounter, setReloadCounter] = useState(0);
 
   // "Find similar" state shelved alongside the Ask UI — reactivation path
   // documented in App.tsx and TODO-semantic-search-ui.md.
@@ -129,7 +135,7 @@ export function DetailView({
     return () => {
       cancelled = true;
     };
-  }, [currentId]);
+  }, [currentId, reloadCounter]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -261,8 +267,11 @@ export function DetailView({
                   </section>
                 )}
 
-                {viewMode === "fetched" && pkg.hub_resource_id && (
-                  <HubInfoSection pkg={pkg} />
+                {viewMode === "fetched" && (
+                  <HubInfoSection
+                    pkg={pkg}
+                    onReload={() => setReloadCounter((c) => c + 1)}
+                  />
                 )}
 
                 {viewMode === "tagged" && tags.length > 0 && (
@@ -355,35 +364,153 @@ export function DetailView({
 // to revive; the relevant Tauri command is `search_similar_families` in
 // commands.rs.
 
-function HubInfoSection({ pkg }: { pkg: PackageRow }) {
+/** Canonical hub category list, mirrors HubCategoryChips. Kept inline
+ *  rather than imported because the picker UI only needs the labels —
+ *  if/when the list grows beyond ~25 entries, hoist to lib/. */
+const HUB_CATEGORIES: readonly string[] = [
+  "Scenes",
+  "Looks",
+  "Clothing",
+  "Hairstyles",
+  "Morphs",
+  "Poses",
+  "Mocap + Animation",
+  "Textures",
+  "Environments",
+  "Lighting + HDRI",
+  "Assets + Accessories",
+  "Audio",
+  "Plugins + Scripts",
+  "Toolkits + Templates",
+  "Comics + Storytelling",
+  "Voxta Content",
+  "Demo + Lite",
+  "Guides",
+  "Other",
+];
+
+function HubInfoSection({
+  pkg,
+  onReload,
+}: {
+  pkg: PackageRow;
+  onReload: () => void;
+}) {
+  const isMatched = pkg.hub_resource_id != null;
   const isOffsite = pkg.hub_is_hub_hosted === 0;
   const tier = pkg.hub_billing_tier ?? "free";
-  const tierLabel = tier === "paid-early-access" ? "Paid (Early Access)"
-    : tier === "paid" ? "Paid"
-    : "Free";
+  const tierLabel =
+    tier === "paid-early-access"
+      ? "Paid (Early Access)"
+      : tier === "paid"
+        ? "Paid"
+        : "Free";
+
+  // Inline action state. Kept local to the section so reopening DetailView
+  // resets everything cleanly (the section unmounts with the modal).
+  const [showPin, setShowPin] = useState(false);
+  const [pinUrl, setPinUrl] = useState("");
+  const [busy, setBusy] = useState<"pin" | "category" | null>(null);
+  const [feedback, setFeedback] = useState<{
+    kind: "ok" | "error";
+    text: string;
+  } | null>(null);
+  const [showCategory, setShowCategory] = useState(false);
+  const [categoryDraft, setCategoryDraft] = useState(pkg.hub_category ?? "Scenes");
+
+  async function handlePin() {
+    if (!pinUrl.trim() || busy) return;
+    setBusy("pin");
+    setFeedback(null);
+    try {
+      const report = await setHubPin([pkg.id], pinUrl);
+      if (!report.any_succeeded) {
+        const r = report.results[0];
+        setFeedback({
+          kind: "error",
+          text: `Pin failed: ${r?.status ?? "unknown"}${r?.detail ? ` — ${r.detail}` : ""}`,
+        });
+        return;
+      }
+      const r = report.results[0];
+      const sib = report.siblings_updated;
+      const auth = report.authors_updated;
+      // Toast wording avoids "propagation" jargon per the agreed copy.
+      let msg = r.method === "override" ? "Overrode hub pin." : "Linked to hub.";
+      if (sib + auth > 0) {
+        msg += ` The match will be applied to ${sib + auth} related row${
+          sib + auth === 1 ? "" : "s"
+        } over the next few minutes — each one is verified against the hub at the configured sync rate.`;
+      } else {
+        msg += " Metadata fills in on the next hub sync.";
+      }
+      setFeedback({ kind: "ok", text: msg });
+      setShowPin(false);
+      setPinUrl("");
+      onReload();
+    } catch (e) {
+      setFeedback({ kind: "error", text: `Pin error: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleCategory() {
+    if (!categoryDraft || busy) return;
+    setBusy("category");
+    setFeedback(null);
+    try {
+      const report = await setHubCategory([pkg.id], categoryDraft);
+      const sib = report.siblings_updated;
+      const msg =
+        sib > 0
+          ? `Updated category for ${report.directly_updated} package${
+              report.directly_updated === 1 ? "" : "s"
+            } and ${sib} sibling version${sib === 1 ? "" : "s"}. Auto-sync will keep this override.`
+          : "Updated category. Auto-sync will keep this override.";
+      setFeedback({ kind: "ok", text: msg });
+      setShowCategory(false);
+      onReload();
+    } catch (e) {
+      setFeedback({ kind: "error", text: `Category error: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <section className="detail-hub-info">
       <h4>Hub</h4>
-      <div className="detail-hub-title">{pkg.hub_title}</div>
-      <div className="detail-hub-meta">
-        <span className={`hub-tier-badge hub-tier-${tier.replace(/[^a-z-]/g, "")}`}>
-          {tierLabel}
-        </span>
-        {pkg.hub_category && (
-          <span className="hub-tier-badge hub-tier-category">{pkg.hub_category}</span>
-        )}
-        {pkg.hub_license && (
-          <span className="hub-tier-badge hub-tier-license">{pkg.hub_license}</span>
-        )}
-        {pkg.hub_match_method && (
-          <span
-            className="hub-tier-badge hub-tier-method"
-            title={`Match method: ${pkg.hub_match_method}`}
-          >
-            via {pkg.hub_match_method}
-          </span>
-        )}
-      </div>
+      {isMatched ? (
+        <>
+          <div className="detail-hub-title">{pkg.hub_title ?? "(metadata pending)"}</div>
+          <div className="detail-hub-meta">
+            <span className={`hub-tier-badge hub-tier-${tier.replace(/[^a-z-]/g, "")}`}>
+              {tierLabel}
+            </span>
+            {pkg.hub_category && (
+              <span className="hub-tier-badge hub-tier-category">{pkg.hub_category}</span>
+            )}
+            {pkg.hub_license && (
+              <span className="hub-tier-badge hub-tier-license">{pkg.hub_license}</span>
+            )}
+            {pkg.hub_match_method && (
+              <span
+                className={`hub-tier-badge hub-tier-method hub-tier-method-${pkg.hub_match_method}`}
+                title={methodTooltip(pkg.hub_match_method)}
+              >
+                via {pkg.hub_match_method}
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="detail-hub-empty">
+          Not linked to a hub resource. Pin a URL below to establish the link;
+          metadata fills in on the next sync.
+        </div>
+      )}
+
       <div className="detail-action-row">
         {pkg.hub_url && (
           <button
@@ -404,9 +531,125 @@ function HubInfoSection({ pkg }: { pkg: PackageRow }) {
             Buy at source ↗
           </button>
         )}
+        <button
+          type="button"
+          className="detail-action"
+          onClick={() => {
+            setShowPin((v) => !v);
+            setShowCategory(false);
+            setFeedback(null);
+          }}
+        >
+          {isMatched ? "Pin to different URL…" : "Pin to hub URL…"}
+        </button>
+        {isMatched && (
+          <button
+            type="button"
+            className="detail-action"
+            onClick={() => {
+              setShowCategory((v) => !v);
+              setShowPin(false);
+              setFeedback(null);
+            }}
+            title="Override the hub_category for this package — protected from auto-sync overwrites"
+          >
+            Override category…
+          </button>
+        )}
       </div>
+
+      {showPin && (
+        <div className="detail-hub-pin-row">
+          <input
+            type="text"
+            value={pinUrl}
+            onChange={(e) => setPinUrl(e.target.value)}
+            placeholder="https://hub.virtamate.com/resources/…  or  37103"
+            disabled={busy === "pin"}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handlePin();
+              if (e.key === "Escape") setShowPin(false);
+            }}
+            autoFocus
+          />
+          <button
+            type="button"
+            className="detail-action detail-action-primary"
+            onClick={handlePin}
+            disabled={!pinUrl.trim() || busy === "pin"}
+          >
+            {busy === "pin" ? "Pinning…" : "Pin"}
+          </button>
+          <button
+            type="button"
+            className="detail-action"
+            onClick={() => {
+              setShowPin(false);
+              setPinUrl("");
+            }}
+            disabled={busy === "pin"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {showCategory && (
+        <div className="detail-hub-pin-row">
+          <select
+            value={categoryDraft}
+            onChange={(e) => setCategoryDraft(e.target.value)}
+            disabled={busy === "category"}
+          >
+            {HUB_CATEGORIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="detail-action detail-action-primary"
+            onClick={handleCategory}
+            disabled={busy === "category"}
+          >
+            {busy === "category" ? "Applying…" : "Apply"}
+          </button>
+          <button
+            type="button"
+            className="detail-action"
+            onClick={() => setShowCategory(false)}
+            disabled={busy === "category"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {feedback && (
+        <div className={`detail-hub-feedback detail-hub-feedback-${feedback.kind}`}>
+          {feedback.text}
+        </div>
+      )}
     </section>
   );
+}
+
+function methodTooltip(method: string): string {
+  switch (method) {
+    case "filename":
+      return "Matched by exact .var filename on the hub CDN.";
+    case "fuzzy_title":
+      return "Matched by fuzzy title search (paid-fallback path).";
+    case "manual":
+      return "You pinned this package to a hub URL. Auto-sync will not overwrite this match.";
+    case "override":
+      return "You overrode a prior auto-match by pinning a different hub URL. Auto-sync will not overwrite this.";
+    case "inherit":
+      return "Inherited from a sibling version's hub match. Will be verified on the next hub sync.";
+    default:
+      return `Match method: ${method}`;
+  }
 }
 
 const GALLERY_INITIAL_CAP = 60;
