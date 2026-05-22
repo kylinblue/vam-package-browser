@@ -9,7 +9,9 @@
 //!
 //! See TODO-visibility-presets.md for the full design context.
 
-use anyhow::Result;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -197,6 +199,198 @@ fn populate_seed_tables(conn: &Connection, seeds: &SeedSpec) -> Result<()> {
 ///
 /// `UNION` (not `UNION ALL`) gives the dedupe-and-terminate property for
 /// cycles. Output is sorted by id for stable test assertions.
+// --- preset CRUD ------------------------------------------------------------
+
+/// Lightweight per-row metadata for the preset list UI. Reads counts
+/// from the join tables but not the seed values themselves; callers
+/// fetch full seeds via `get_preset` when they actually need them.
+#[derive(Debug, Clone, Serialize)]
+pub struct PresetSummary {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    /// Number of `visibility_preset_creators` rows for this preset.
+    pub creator_count: i64,
+    /// Number of `visibility_preset_packages` rows for this preset.
+    pub package_count: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Preset {
+    pub summary: PresetSummary,
+    /// The full seed spec, ready to feed into `compute_closure` or
+    /// `materialize::load`. Creator names are case-preserved; matching
+    /// against `packages.creator` is case-insensitive per the closure
+    /// CTE.
+    pub seeds: SeedSpec,
+}
+
+/// All presets, ordered by most-recently-updated first (so the list
+/// surfaces what the user worked with last).
+pub fn list_presets(conn: &Connection) -> Result<Vec<PresetSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.description, p.created_at, p.updated_at,
+                (SELECT COUNT(*) FROM visibility_preset_creators c WHERE c.preset_id = p.id),
+                (SELECT COUNT(*) FROM visibility_preset_packages k WHERE k.preset_id = p.id)
+         FROM visibility_presets p
+         ORDER BY p.updated_at DESC, p.id DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PresetSummary {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+                creator_count: r.get(5)?,
+                package_count: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Full preset including its seed spec.
+pub fn get_preset(conn: &Connection, id: i64) -> Result<Preset> {
+    let summary: PresetSummary = conn.query_row(
+        "SELECT p.id, p.name, p.description, p.created_at, p.updated_at,
+                (SELECT COUNT(*) FROM visibility_preset_creators c WHERE c.preset_id = p.id),
+                (SELECT COUNT(*) FROM visibility_preset_packages k WHERE k.preset_id = p.id)
+         FROM visibility_presets p WHERE p.id = ?1",
+        params![id],
+        |r| {
+            Ok(PresetSummary {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+                creator_count: r.get(5)?,
+                package_count: r.get(6)?,
+            })
+        },
+    )?;
+
+    let creators: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT creator FROM visibility_preset_creators
+              WHERE preset_id = ?1 ORDER BY creator COLLATE NOCASE",
+        )?;
+        let rows = stmt
+            .query_map(params![id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let package_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT package_id FROM visibility_preset_packages
+              WHERE preset_id = ?1 ORDER BY package_id",
+        )?;
+        let rows = stmt
+            .query_map(params![id], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+
+    Ok(Preset {
+        summary,
+        seeds: SeedSpec {
+            creators,
+            package_ids,
+        },
+    })
+}
+
+/// Create a new preset with the given name + seeds. Returns the new
+/// row id. Fails if `name` is empty or already in use (UNIQUE
+/// constraint on visibility_presets.name).
+pub fn create_preset(
+    conn: &mut Connection,
+    name: &str,
+    description: Option<&str>,
+    seeds: &SeedSpec,
+) -> Result<i64> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("preset name cannot be empty"));
+    }
+    let now = unix_now();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO visibility_presets (name, description, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?3)",
+        params![name, description, now],
+    )?;
+    let id = tx.last_insert_rowid();
+    {
+        let mut ins_cr =
+            tx.prepare("INSERT INTO visibility_preset_creators (preset_id, creator) VALUES (?1, ?2)")?;
+        for c in &seeds.creators {
+            let c = c.trim();
+            if c.is_empty() {
+                continue;
+            }
+            // OR IGNORE in case the caller passed duplicates.
+            ins_cr.execute(params![id, c]).ok();
+        }
+        let mut ins_pk = tx.prepare(
+            "INSERT INTO visibility_preset_packages (preset_id, package_id) VALUES (?1, ?2)",
+        )?;
+        for &p in &seeds.package_ids {
+            ins_pk.execute(params![id, p]).ok();
+        }
+    }
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Delete a preset. ON DELETE CASCADE on the join tables cleans up
+/// creator + package seeds automatically.
+pub fn delete_preset(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM visibility_presets WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Rename a preset and/or update its description. Either field can be
+/// passed `None` to leave unchanged. Bumps `updated_at`.
+pub fn rename_preset(
+    conn: &Connection,
+    id: i64,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> Result<()> {
+    let now = unix_now();
+    if let Some(n) = name {
+        let n = n.trim();
+        if n.is_empty() {
+            return Err(anyhow!("preset name cannot be empty"));
+        }
+        conn.execute(
+            "UPDATE visibility_presets SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![n, now, id],
+        )?;
+    }
+    if let Some(d) = description {
+        conn.execute(
+            "UPDATE visibility_presets SET description = ?1, updated_at = ?2 WHERE id = ?3",
+            params![d, now, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// --- closure SQL ------------------------------------------------------------
+
 const CLOSURE_SQL: &str = "
     WITH RECURSIVE
     seeds(id) AS (
@@ -224,7 +418,9 @@ mod tests {
     use rusqlite::Connection;
 
     /// Build a minimal schema for closure testing. Just the columns the
-    /// closure CTE reads — full migration not needed.
+    /// closure CTE reads — full migration not needed. Also includes the
+    /// preset tables (v20→v21) so the preset-CRUD tests can share this
+    /// fixture without a separate setup_db_with_presets variant.
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(
@@ -240,9 +436,32 @@ mod tests {
                  dst_package_id INTEGER,
                  raw_dep_key    TEXT NOT NULL,
                  PRIMARY KEY (src_package_id, raw_dep_key)
+             );
+             CREATE TABLE visibility_presets (
+                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name        TEXT NOT NULL UNIQUE,
+                 description TEXT,
+                 created_at  INTEGER NOT NULL,
+                 updated_at  INTEGER NOT NULL
+             );
+             CREATE TABLE visibility_preset_creators (
+                 preset_id INTEGER NOT NULL,
+                 creator   TEXT NOT NULL,
+                 PRIMARY KEY (preset_id, creator),
+                 FOREIGN KEY (preset_id) REFERENCES visibility_presets(id) ON DELETE CASCADE
+             );
+             CREATE TABLE visibility_preset_packages (
+                 preset_id  INTEGER NOT NULL,
+                 package_id INTEGER NOT NULL,
+                 PRIMARY KEY (preset_id, package_id),
+                 FOREIGN KEY (preset_id)  REFERENCES visibility_presets(id) ON DELETE CASCADE,
+                 FOREIGN KEY (package_id) REFERENCES packages(id)            ON DELETE CASCADE
              );",
         )
         .unwrap();
+        // FK enforcement must be on for the cascade-on-delete tests to
+        // exercise the join-table cleanup. SQLite defaults to off.
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn
     }
 
@@ -515,5 +734,157 @@ mod tests {
         assert_eq!(preview.from_deps, 1); // 4
         assert_eq!(preview.total, 4);
         assert_eq!(preview.unresolved.len(), 0);
+    }
+
+    // --- preset CRUD tests --------------------------------------------------
+
+    #[test]
+    fn create_and_get_preset_round_trip() {
+        let mut conn = setup_db();
+        add_pkg(&conn, 7, "Bob", "Foo");
+        let seeds = SeedSpec {
+            creators: vec!["Alice".into(), "Bob".into()],
+            package_ids: vec![7],
+        };
+        let id = create_preset(&mut conn, "Working Set", Some("notes"), &seeds).unwrap();
+        assert!(id > 0);
+
+        let preset = get_preset(&conn, id).unwrap();
+        assert_eq!(preset.summary.name, "Working Set");
+        assert_eq!(preset.summary.description.as_deref(), Some("notes"));
+        assert_eq!(preset.summary.creator_count, 2);
+        assert_eq!(preset.summary.package_count, 1);
+        // Stored creator order is alphabetical via the get_preset SELECT.
+        assert_eq!(preset.seeds.creators, vec!["Alice", "Bob"]);
+        assert_eq!(preset.seeds.package_ids, vec![7]);
+    }
+
+    #[test]
+    fn list_presets_orders_by_updated_at_desc() {
+        let mut conn = setup_db();
+        let a = create_preset(&mut conn, "A", None, &SeedSpec::default()).unwrap();
+        // Force distinct updated_at: a manual UPDATE bumping b later.
+        let b = create_preset(&mut conn, "B", None, &SeedSpec::default()).unwrap();
+        conn.execute(
+            "UPDATE visibility_presets SET updated_at = updated_at + 100 WHERE id = ?1",
+            params![b],
+        )
+        .unwrap();
+        let list = list_presets(&conn).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, b); // most-recently-updated first
+        assert_eq!(list[1].id, a);
+    }
+
+    #[test]
+    fn create_preset_rejects_empty_name() {
+        let mut conn = setup_db();
+        let err = create_preset(&mut conn, "  ", None, &SeedSpec::default()).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn duplicate_name_is_rejected() {
+        let mut conn = setup_db();
+        create_preset(&mut conn, "Same", None, &SeedSpec::default()).unwrap();
+        let err = create_preset(&mut conn, "Same", None, &SeedSpec::default()).unwrap_err();
+        // Surfaces SQLite UNIQUE-constraint error via anyhow.
+        let msg = format!("{err:#}");
+        assert!(msg.to_lowercase().contains("unique") || msg.contains("constraint"));
+    }
+
+    #[test]
+    fn delete_preset_cascades_to_join_tables() {
+        let mut conn = setup_db();
+        add_pkg(&conn, 1, "Alice", "Foo");
+        let seeds = SeedSpec {
+            creators: vec!["Alice".into()],
+            package_ids: vec![1],
+        };
+        let id = create_preset(&mut conn, "Tmp", None, &seeds).unwrap();
+
+        // Sanity check: rows exist in both join tables.
+        let cr_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM visibility_preset_creators WHERE preset_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cr_count, 1);
+
+        delete_preset(&conn, id).unwrap();
+
+        let presets: i64 = conn
+            .query_row("SELECT COUNT(*) FROM visibility_presets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(presets, 0);
+        let cr_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM visibility_preset_creators",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cr_after, 0);
+        let pk_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM visibility_preset_packages",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pk_after, 0);
+    }
+
+    #[test]
+    fn rename_preset_bumps_updated_at() {
+        let mut conn = setup_db();
+        let id = create_preset(&mut conn, "Old", None, &SeedSpec::default()).unwrap();
+        let before: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM visibility_presets WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Sleep is overkill; just shift updated_at backward in time to
+        // guarantee a strictly increasing comparison after rename.
+        conn.execute(
+            "UPDATE visibility_presets SET updated_at = ?1 WHERE id = ?2",
+            params![before - 100, id],
+        )
+        .unwrap();
+        rename_preset(&conn, id, Some("New"), None).unwrap();
+        let row = get_preset(&conn, id).unwrap();
+        assert_eq!(row.summary.name, "New");
+        assert!(row.summary.updated_at > before - 100);
+    }
+
+    #[test]
+    fn closure_via_loaded_preset() {
+        // End-to-end: create a preset, fetch its seeds, run the closure.
+        // Confirms the seeds we store round-trip into something
+        // compute_closure can use.
+        let mut conn = setup_db();
+        add_pkg(&conn, 1, "Alice", "Foo");
+        add_pkg(&conn, 2, "Alice", "Bar");
+        add_pkg(&conn, 3, "Bob", "Plugin");
+        add_dep(&conn, 1, Some(3), "Bob.Plugin.1");
+
+        let id = create_preset(
+            &mut conn,
+            "Alice + Bob.Plugin via dep",
+            None,
+            &SeedSpec {
+                creators: vec!["Alice".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+        let preset = get_preset(&conn, id).unwrap();
+        let mut closure_ids = compute_closure(&conn, &preset.seeds).unwrap();
+        closure_ids.sort();
+        assert_eq!(closure_ids, vec![1, 2, 3]);
     }
 }

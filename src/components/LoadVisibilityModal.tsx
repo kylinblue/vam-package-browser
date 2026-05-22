@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   computeLoadPlan,
+  createPreset,
+  deletePreset,
+  getPreset,
+  listPresets,
   loadVisibility,
   unloadAll,
   type LoadPlan,
   type LoadResult,
+  type PresetSummary,
+  type SeedSpec,
 } from "../lib/api";
 import type { ToastMessage } from "./Toast";
 
@@ -37,14 +43,38 @@ export function LoadVisibilityModal({
 }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
 
-  // Build the seed spec we'll send to backend. Null selection = empty
-  // SeedSpec, which means "compute the plan for unloading everything."
-  const seeds = {
-    creators: [],
-    package_ids: selection ?? [],
-  };
+  // The seeds currently driving the plan. Starts from the caller's
+  // `selection` but can be reassigned by clicking a saved preset.
+  // `null` selection (= the unload-all entry point) keeps activeSeeds
+  // null until the user picks a preset.
+  const [activeSeeds, setActiveSeeds] = useState<SeedSpec | null>(
+    selection ? { creators: [], package_ids: selection } : null,
+  );
 
-  // Load the plan on mount / whenever selection changes.
+  // Saved presets — loaded once on mount, refreshed after create/delete.
+  const [presets, setPresets] = useState<PresetSummary[]>([]);
+  const [saveFormOpen, setSaveFormOpen] = useState(false);
+  const [saveDraftName, setSaveDraftName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Effective seeds for the plan + commit. Falls back to the empty
+  // SeedSpec (= unload-all) when nothing is selected and no preset is
+  // active.
+  const seeds: SeedSpec = activeSeeds ?? { creators: [], package_ids: [] };
+
+  // Refresh the saved-preset list. Called once on mount and after any
+  // create/delete so the list stays current.
+  const refreshPresets = useCallback(async () => {
+    if (!setupComplete) return;
+    try {
+      const rows = await listPresets();
+      setPresets(rows);
+    } catch (e) {
+      console.error("list_presets:", e);
+    }
+  }, [setupComplete]);
+
+  // Load the plan whenever the effective seeds change.
   useEffect(() => {
     if (!setupComplete) return;
     setPhase({ kind: "loading" });
@@ -57,14 +87,26 @@ export function LoadVisibilityModal({
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection?.join(","), setupComplete]);
+  }, [
+    activeSeeds?.creators.join("|"),
+    activeSeeds?.package_ids.join(","),
+    setupComplete,
+  ]);
+
+  useEffect(() => {
+    refreshPresets();
+  }, [refreshPresets]);
 
   const commit = useCallback(async () => {
     setPhase({ kind: "committing" });
     try {
-      const result: LoadResult = selection
-        ? await loadVisibility(seeds)
-        : await unloadAll();
+      // If the user hasn't picked anything and the caller said "no
+      // selection" too, treat it as unload-all. Otherwise load the
+      // active seeds (which may be from a clicked preset).
+      const result: LoadResult =
+        activeSeeds === null
+          ? await unloadAll()
+          : await loadVisibility(activeSeeds);
       const msg = formatResult(result);
       onActionResult({ kind: "ok", text: msg });
       onClose();
@@ -73,7 +115,57 @@ export function LoadVisibilityModal({
       setPhase({ kind: "error", message: `${e}` });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection, onActionResult, onClose]);
+  }, [activeSeeds, onActionResult, onClose]);
+
+  const loadPresetSeeds = useCallback(
+    async (id: number) => {
+      setBusy(true);
+      try {
+        const preset = await getPreset(id);
+        setActiveSeeds(preset.seeds);
+      } catch (e) {
+        onActionResult({ kind: "error", text: `Open preset failed: ${e}` });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onActionResult],
+  );
+
+  const handleDeletePreset = useCallback(
+    async (id: number, name: string) => {
+      if (!window.confirm(`Delete preset "${name}"?`)) return;
+      setBusy(true);
+      try {
+        await deletePreset(id);
+        await refreshPresets();
+        onActionResult({ kind: "ok", text: `Deleted preset "${name}".` });
+      } catch (e) {
+        onActionResult({ kind: "error", text: `Delete failed: ${e}` });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshPresets, onActionResult],
+  );
+
+  const handleSavePreset = useCallback(async () => {
+    const name = saveDraftName.trim();
+    if (!name) return;
+    setBusy(true);
+    try {
+      await createPreset(name, seeds);
+      setSaveDraftName("");
+      setSaveFormOpen(false);
+      await refreshPresets();
+      onActionResult({ kind: "ok", text: `Saved preset "${name}".` });
+    } catch (e) {
+      onActionResult({ kind: "error", text: `Save failed: ${e}` });
+    } finally {
+      setBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveDraftName, seeds, refreshPresets, onActionResult]);
 
   if (!setupComplete) {
     return (
@@ -95,14 +187,23 @@ export function LoadVisibilityModal({
     );
   }
 
-  const isUnloadAll = selection === null;
+  const isUnloadAll = activeSeeds === null;
+  const seedsAreEmpty =
+    seeds.creators.length === 0 && seeds.package_ids.length === 0;
 
   return (
     <div style={overlayStyle} role="dialog" aria-modal="true">
       <div style={cardStyle}>
-        <h2 style={headingStyle}>
-          {isUnloadAll ? "Unload all packages" : "Load to active folder"}
-        </h2>
+        <h2 style={headingStyle}>Visibility — load / unload</h2>
+
+        {presets.length > 0 && (
+          <PresetsSection
+            presets={presets}
+            busy={busy}
+            onLoadPreset={loadPresetSeeds}
+            onDeletePreset={handleDeletePreset}
+          />
+        )}
 
         {phase.kind === "loading" && (
           <p style={dimText}>Computing closure…</p>
@@ -120,12 +221,28 @@ export function LoadVisibilityModal({
         )}
 
         {phase.kind === "ready" && (
-          <ReadyView
-            plan={phase.plan}
-            isUnloadAll={isUnloadAll}
-            onCancel={onClose}
-            onCommit={commit}
-          />
+          <>
+            <ReadyView
+              plan={phase.plan}
+              isUnloadAll={isUnloadAll}
+              onCancel={onClose}
+              onCommit={commit}
+            />
+            {!seedsAreEmpty && (
+              <SavePresetSection
+                open={saveFormOpen}
+                draftName={saveDraftName}
+                busy={busy}
+                onOpen={() => setSaveFormOpen(true)}
+                onCancel={() => {
+                  setSaveFormOpen(false);
+                  setSaveDraftName("");
+                }}
+                onDraftChange={setSaveDraftName}
+                onSave={handleSavePreset}
+              />
+            )}
+          </>
         )}
 
         {phase.kind === "committing" && (
@@ -263,6 +380,141 @@ function ReadyView({ plan, isUnloadAll, onCancel, onCommit }: ReadyProps) {
   );
 }
 
+interface PresetsSectionProps {
+  presets: PresetSummary[];
+  busy: boolean;
+  onLoadPreset: (id: number) => void;
+  onDeletePreset: (id: number, name: string) => void;
+}
+
+function PresetsSection({
+  presets,
+  busy,
+  onLoadPreset,
+  onDeletePreset,
+}: PresetsSectionProps) {
+  return (
+    <div style={presetsBlockStyle}>
+      <div style={presetsHeaderStyle}>
+        Saved presets ({presets.length})
+      </div>
+      <ul style={presetsListStyle}>
+        {presets.map((p) => (
+          <li key={p.id} style={presetRowStyle}>
+            <button
+              type="button"
+              style={presetLoadButtonStyle}
+              onClick={() => onLoadPreset(p.id)}
+              disabled={busy}
+              title="Click to load this preset into the plan"
+            >
+              <span style={{ fontWeight: 600 }}>{p.name}</span>
+              <span style={presetCountsStyle}>
+                {p.creator_count > 0 && (
+                  <>
+                    {p.creator_count} author
+                    {p.creator_count === 1 ? "" : "s"}
+                  </>
+                )}
+                {p.creator_count > 0 && p.package_count > 0 && " + "}
+                {p.package_count > 0 && (
+                  <>
+                    {p.package_count} pkg{p.package_count === 1 ? "" : "s"}
+                  </>
+                )}
+                {p.creator_count === 0 && p.package_count === 0 && (
+                  <em>empty</em>
+                )}
+              </span>
+            </button>
+            <button
+              type="button"
+              style={presetDeleteButtonStyle}
+              onClick={() => onDeletePreset(p.id, p.name)}
+              disabled={busy}
+              aria-label={`Delete preset ${p.name}`}
+              title="Delete this preset"
+            >
+              ×
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+interface SavePresetSectionProps {
+  open: boolean;
+  draftName: string;
+  busy: boolean;
+  onOpen: () => void;
+  onCancel: () => void;
+  onDraftChange: (s: string) => void;
+  onSave: () => void;
+}
+
+function SavePresetSection({
+  open,
+  draftName,
+  busy,
+  onOpen,
+  onCancel,
+  onDraftChange,
+  onSave,
+}: SavePresetSectionProps) {
+  if (!open) {
+    return (
+      <button
+        type="button"
+        style={linkButtonStyle}
+        onClick={onOpen}
+        disabled={busy}
+        title="Save the current seed spec as a named preset for future reuse"
+      >
+        + Save as preset…
+      </button>
+    );
+  }
+  return (
+    <div style={saveFormStyle}>
+      <input
+        type="text"
+        value={draftName}
+        onChange={(e) => onDraftChange(e.target.value)}
+        placeholder="Preset name"
+        autoFocus
+        disabled={busy}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onSave();
+          if (e.key === "Escape") onCancel();
+        }}
+        style={saveInputStyle}
+      />
+      <button
+        type="button"
+        style={
+          draftName.trim() && !busy
+            ? primaryButtonStyle
+            : disabledButtonStyle
+        }
+        onClick={onSave}
+        disabled={!draftName.trim() || busy}
+      >
+        Save
+      </button>
+      <button
+        type="button"
+        style={secondaryButtonStyle}
+        onClick={onCancel}
+        disabled={busy}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function formatResult(r: LoadResult): string {
   const parts: string[] = [];
   if (r.added > 0) parts.push(`+${r.added} added`);
@@ -382,4 +634,88 @@ const secondaryButtonStyle: React.CSSProperties = {
   padding: "8px 16px",
   borderRadius: 4,
   cursor: "pointer",
+};
+
+const presetsBlockStyle: React.CSSProperties = {
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+  padding: "8px 10px",
+  marginBottom: 12,
+};
+
+const presetsHeaderStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--fg-dim)",
+  marginBottom: 6,
+};
+
+const presetsListStyle: React.CSSProperties = {
+  listStyle: "none",
+  padding: 0,
+  margin: 0,
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const presetRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "stretch",
+  gap: 4,
+};
+
+const presetLoadButtonStyle: React.CSSProperties = {
+  flex: 1,
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  background: "var(--bg-elev)",
+  color: "var(--fg)",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+  padding: "6px 10px",
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+const presetCountsStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--fg-dim)",
+};
+
+const presetDeleteButtonStyle: React.CSSProperties = {
+  background: "var(--bg-elev)",
+  color: "var(--fg-dim)",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+  padding: "0 10px",
+  cursor: "pointer",
+  fontSize: 16,
+  lineHeight: 1,
+};
+
+const linkButtonStyle: React.CSSProperties = {
+  background: "transparent",
+  color: "var(--accent)",
+  border: "none",
+  padding: "4px 0",
+  cursor: "pointer",
+  textAlign: "left",
+  fontSize: 13,
+};
+
+const saveFormStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 6,
+  marginTop: 6,
+};
+
+const saveInputStyle: React.CSSProperties = {
+  flex: 1,
+  background: "var(--bg)",
+  color: "var(--fg)",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+  padding: "6px 8px",
 };

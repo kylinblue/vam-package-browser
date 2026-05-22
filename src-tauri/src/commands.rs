@@ -532,6 +532,55 @@ pub fn compute_load_plan(
     crate::materialize::compute_load_plan(&conn, &seeds).map_err(map_err)
 }
 
+// --- Named-preset CRUD ------------------------------------------------------
+
+#[tauri::command]
+pub fn list_presets(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::visibility::PresetSummary>, String> {
+    let conn = state.db.lock();
+    crate::visibility::list_presets(&conn).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn get_preset(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<crate::visibility::Preset, String> {
+    let conn = state.db.lock();
+    crate::visibility::get_preset(&conn, id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn create_preset(
+    state: State<'_, AppState>,
+    name: String,
+    description: Option<String>,
+    seeds: crate::visibility::SeedSpec,
+) -> Result<i64, String> {
+    let mut conn = state.db.lock();
+    crate::visibility::create_preset(&mut conn, &name, description.as_deref(), &seeds)
+        .map_err(map_err)
+}
+
+#[tauri::command]
+pub fn delete_preset(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.lock();
+    crate::visibility::delete_preset(&conn, id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn rename_preset(
+    state: State<'_, AppState>,
+    id: i64,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    crate::visibility::rename_preset(&conn, id, name.as_deref(), description.as_deref())
+        .map_err(map_err)
+}
+
 #[tauri::command]
 pub fn set_favorite(
     state: State<'_, AppState>,

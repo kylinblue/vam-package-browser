@@ -473,6 +473,61 @@ export async function computeLoadPlan(seeds: SeedSpec): Promise<LoadPlan> {
   return invoke<LoadPlan>("compute_load_plan", { seeds });
 }
 
+// --- Named-preset CRUD -----------------------------------------------------
+
+export interface PresetSummary {
+  id: number;
+  name: string;
+  description: string | null;
+  /** Number of distinct author seeds attached to this preset. */
+  creator_count: number;
+  /** Number of explicit package-id seeds attached to this preset. */
+  package_count: number;
+  /** Unix seconds. */
+  created_at: number;
+  updated_at: number;
+}
+
+export interface Preset {
+  summary: PresetSummary;
+  /** Full seed spec — ready to feed back into computeLoadPlan or
+   *  loadVisibility for "load this preset" flows. */
+  seeds: SeedSpec;
+}
+
+/** All presets, most-recently-updated first. */
+export async function listPresets(): Promise<PresetSummary[]> {
+  return invoke<PresetSummary[]>("list_presets");
+}
+
+export async function getPreset(id: number): Promise<Preset> {
+  return invoke<Preset>("get_preset", { id });
+}
+
+/** Create a new named preset. Returns the new row id. Fails if `name`
+ *  is empty or duplicates an existing preset (UNIQUE constraint). */
+export async function createPreset(
+  name: string,
+  seeds: SeedSpec,
+  description?: string,
+): Promise<number> {
+  return invoke<number>("create_preset", { name, description, seeds });
+}
+
+export async function deletePreset(id: number): Promise<void> {
+  return invoke("delete_preset", { id });
+}
+
+/** Rename a preset and/or update its description. Either side can be
+ *  omitted to leave it unchanged. Bumps `updated_at`. */
+export async function renamePreset(
+  id: number,
+  name?: string,
+  description?: string,
+): Promise<void> {
+  return invoke("rename_preset", { id, name, description });
+}
+
 export interface ThumbProgress {
   id: number;
   ok: boolean;
