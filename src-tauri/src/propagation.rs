@@ -152,7 +152,7 @@ pub fn propagate_hub_match(conn: &Connection, src_row_id: i64) -> Result<Propaga
     // Two guards apply:
     //   (a) NULL|inherit hub_match_method — same protection as Tier 1
     //   (b) hub_author_manual = 0 — a user-locked author display name
-    //       takes precedence over any propagation source. Both v17+.
+    //       takes precedence over any propagation source. Both v18+.
     //
     // Last-write-wins among soft rows on the rare case where two
     // different packages by the same creator pin to resources with
@@ -203,7 +203,7 @@ mod tests {
     /// Minimal `packages` schema covering only the columns the propagation
     /// helper reads or writes. We don't run the full app migration chain
     /// in tests — too much surface area for what's a focused predicate
-    /// check. The shape mirrors the v16 layout.
+    /// check. The shape mirrors the layout through v20.
     fn schema(conn: &Connection) {
         conn.execute_batch(
             r#"

@@ -84,7 +84,7 @@ pub struct PackageRow {
     pub hub_lastmod: Option<i64>,
     pub hub_external_url: Option<String>,
     pub hub_match_method: Option<String>,
-    /// User-override lock flags (0/1) from v16/v17/v18. Surface in the
+    /// User-override lock flags (0/1) from v17/v18/v19. Surface in the
     /// frontend so the UI can show indicators next to overridden fields
     /// and offer per-field "restore" actions.
     pub hub_category_manual: i64,

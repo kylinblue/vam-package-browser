@@ -71,10 +71,14 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v14_to_v15(&conn)?;
         conn.pragma_update(None, "user_version", 15)?;
     }
-    if current < 16 {
-        migrate_v15_to_v16(&conn)?;
-        conn.pragma_update(None, "user_version", 16)?;
-    }
+    // v15 → v16 slot is intentionally absent on this branch. A parallel
+    // Claude session also claimed v16 (for a `predicted_*` hub-category
+    // prediction feature) and their migration touched the shared dev DB
+    // first. To avoid two `migrate_v15_to_v16` functions colliding at
+    // merge time, this branch starts at v16 → v17 and leaves the slot
+    // for them. Every migration below is defensive (add_column_if_absent)
+    // so they run safely regardless of whether the other branch's v16
+    // has executed yet, and regardless of order of merge.
     if current < 17 {
         migrate_v16_to_v17(&conn)?;
         conn.pragma_update(None, "user_version", 17)?;
@@ -94,17 +98,59 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
+    // `hub_category_manual = 1` means "the user set this category; auto-
+    // sync writers must leave it alone". Sync writers honor this with a
+    // CASE expression in their UPDATE statements; set_hub_category
+    // toggles the flag on, clear_override toggles it off and restores
+    // from hub_category_original. Stored as INTEGER (0/1) for cheap
+    // WHERE filters.
+    //
+    // Originally landed at v15 → v16 on this branch; renumbered to
+    // v16 → v17 to coexist with the parallel session's v15 → v16. Uses
+    // add_column_if_absent so it's safe on databases that already ran
+    // the old v15 → v16 with the same content.
+    add_column_if_absent(conn, "hub_category_manual", "INTEGER DEFAULT 0")?;
+    Ok(())
+}
+
+fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
+    // Same manual-flag pattern for `hub_author`. A creator's hub display
+    // name sometimes diverges from how the user thinks of them — typos,
+    // renames, etc. `hub_author_manual = 1` protects the corrected name
+    // from being clobbered on the next hub sync. Renumbered from the
+    // original v16 → v17 slot.
+    add_column_if_absent(conn, "hub_author_manual", "INTEGER DEFAULT 0")?;
+    Ok(())
+}
+
+fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
+    // Same pattern for the LOCAL heuristic `package_type` (scanner-
+    // derived from contentList path prefixes). The scanner upserts
+    // packages with a CASE expression on package_type_manual=1 so user
+    // overrides survive rescans. Renumbered from the original v17 → v18
+    // slot.
+    //
+    // Note: the old v18 → v19 migration on this branch was a defensive
+    // backfill for hub_category_manual after the parallel-session
+    // collision was discovered. That backfill is now redundant — the
+    // new v16 → v17 above already uses add_column_if_absent, which
+    // covers the same case. The slot is reused for package_type_manual.
+    add_column_if_absent(conn, "package_type_manual", "INTEGER DEFAULT 0")?;
+    Ok(())
+}
+
 fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
     // Snapshot columns for the three overrideable fields. When the user
     // does their first set_* override on a row, the previous (auto-
     // assigned) value is stashed here so the UI can show "X (was Y)"
-    // and so clear_override can restore the prior value without needing
-    // another sync / scan.
+    // and clear_override can restore the prior value without needing a
+    // resync or rescan.
     //
     // Defensively add-if-absent — same parallel-session-collision lesson
-    // from v19. If another branch took v20 first with different content,
-    // this still ends up with our columns present, and the user_version
-    // counter just advances.
+    // that motivated the renumbering above. If another branch were to
+    // take v20 first with different content, this still ends up with
+    // our columns present, and the user_version counter just advances.
     add_column_if_absent(conn, "package_type_original", "TEXT")?;
     add_column_if_absent(conn, "hub_category_original", "TEXT")?;
     add_column_if_absent(conn, "hub_author_original", "TEXT")?;
@@ -122,87 +168,6 @@ fn add_column_if_absent(conn: &Connection, name: &str, decl: &str) -> Result<()>
             "ALTER TABLE packages ADD COLUMN {name} {decl};"
         ))?;
     }
-    Ok(())
-}
-
-fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
-    // Backfill for parallel-session migration collision.
-    //
-    // On this branch v16 was supposed to add `hub_category_manual`. But on
-    // databases that another session's branch took to v16 first (with a
-    // different schema change — observed: predicted_hub_category /
-    // predicted_method / predicted_confidence columns), the user_version
-    // counter advanced past 16 and my v16 migration was skipped, leaving
-    // the column missing while subsequent v17/v18 ran fine.
-    //
-    // This migration adds the column idempotently — only if it's actually
-    // absent — so it's safe to run on a freshly-created DB (where v16
-    // already added it) AND on the diverged DB (where it's missing).
-    //
-    // Going forward the cleaner pattern would be defensive ALTER ADD in
-    // every migration that adds columns, but that's a wider refactor; one
-    // backfill is sufficient for the immediate breakage.
-    let has_col: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('packages') WHERE name = 'hub_category_manual'",
-        [],
-        |r| Ok(r.get::<_, i64>(0)? > 0),
-    )?;
-    if !has_col {
-        conn.execute_batch(
-            "ALTER TABLE packages ADD COLUMN hub_category_manual INTEGER DEFAULT 0;",
-        )?;
-    }
-    Ok(())
-}
-
-fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
-    // Companion to v16/v17's manual-flag pattern, but for the LOCAL
-    // heuristic classification rather than a hub field. `package_type` is
-    // determined by the scanner from contentList path prefixes — it's
-    // often Mixed/Unknown for packages whose content spans multiple
-    // categories, which makes filtering frustrating. The user knows the
-    // dominant content; let them override and have it stick across
-    // rescans.
-    //
-    // `package_type_manual = 1` means "don't reclassify on rescan". The
-    // scanner's package upsert uses a CASE expression to preserve the
-    // override when the flag is set.
-    conn.execute_batch(
-        r#"
-        ALTER TABLE packages ADD COLUMN package_type_manual INTEGER DEFAULT 0;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
-    // Companion to v16's hub_category_manual: a creator's hub display name
-    // ("hub_author") sometimes diverges from how the user thinks of them
-    // — typos in the hub username, name changes, etc. `hub_author_manual
-    // = 1` means "the user has corrected this; don't overwrite it on
-    // sync". Same INTEGER (0/1) shape as v16 for cheap WHERE filters and
-    // CASE-expression preservation.
-    conn.execute_batch(
-        r#"
-        ALTER TABLE packages ADD COLUMN hub_author_manual INTEGER DEFAULT 0;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
-    // User-driven category overrides need provenance so the next hub-sync
-    // pass doesn't stomp them. `hub_category_manual = 1` means "leave
-    // hub_category alone, the user set it" — writers in the sync flow
-    // honor this with a CASE expression instead of an unconditional
-    // overwrite.
-    //
-    // Stored as INTEGER (0/1) rather than TEXT for cheap WHERE filters.
-    conn.execute_batch(
-        r#"
-        ALTER TABLE packages ADD COLUMN hub_category_manual INTEGER DEFAULT 0;
-        "#,
-    )?;
     Ok(())
 }
 
