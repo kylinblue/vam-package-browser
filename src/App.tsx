@@ -62,6 +62,11 @@ export default function App() {
   // set of packages you've manually classified. Client-side filter on
   // visiblePackages; the underlying loaded set isn't changed.
   const [overridesOnly, setOverridesOnly] = useState(false);
+  // Show only packages with NO hub linkage at all — neither an
+  // auto-match (hub_resource_id) nor a user-set category override.
+  // These are the rows that render "ghost" / dimmed in Fetched mode.
+  // Useful for finding candidates for manual classification.
+  const [unmatchedOnly, setUnmatchedOnly] = useState(false);
   const [tileSize, setTileSize] = useState<number>(() =>
     loadTileDim("tileSize", 200),
   );
@@ -226,9 +231,22 @@ export default function App() {
           p.hub_match_method === "override";
         if (!hasOverride) return false;
       }
+      if (unmatchedOnly) {
+        // Mirrors PackageGrid's isHubGhost predicate: no resource link
+        // AND no user-set category. A package with just an override
+        // hub_category counts as "touched" and is excluded.
+        if (p.hub_resource_id != null || p.hub_category) return false;
+      }
       return true;
     });
-  }, [packages, errorsOnly, includeHidden, favoritesOnly, overridesOnly]);
+  }, [
+    packages,
+    errorsOnly,
+    includeHidden,
+    favoritesOnly,
+    overridesOnly,
+    unmatchedOnly,
+  ]);
 
   // Count of distinct filter axes currently set away from default. Drives
   // the toolbar's Clear-filters button (label + disabled state). Excludes
@@ -245,6 +263,7 @@ export default function App() {
     if (selectedTags.length > 0) n++;
     if (favoritesOnly) n++;
     if (overridesOnly) n++;
+    if (unmatchedOnly) n++;
     if (missingPreview) n++;
     if (errorsOnly) n++;
     if (minSizeMb !== "" || maxSizeMb !== "") n++;
@@ -258,6 +277,7 @@ export default function App() {
     selectedTags,
     favoritesOnly,
     overridesOnly,
+    unmatchedOnly,
     missingPreview,
     errorsOnly,
     minSizeMb,
@@ -275,6 +295,7 @@ export default function App() {
     setSelectedTags([]);
     setFavoritesOnly(false);
     setOverridesOnly(false);
+    setUnmatchedOnly(false);
     setMissingPreview(false);
     setErrorsOnly(false);
     setMinSizeMb("");
@@ -620,6 +641,17 @@ export default function App() {
           <label
             className="toolbar-toggle"
             style={{ marginLeft: "auto" }}
+            title="Show only packages with no hub linkage at all — no auto-match, no manual pin, no category override. These are the rows that render dimmed (ghost) in Fetched mode."
+          >
+            <input
+              type="checkbox"
+              checked={unmatchedOnly}
+              onChange={(e) => setUnmatchedOnly(e.target.checked)}
+            />
+            <span>👻 Unmatched only</span>
+          </label>
+          <label
+            className="toolbar-toggle"
             title="Show only packages with a user override (category / author / type / pin)"
           >
             <input
