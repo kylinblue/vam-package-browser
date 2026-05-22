@@ -7,6 +7,7 @@ pub mod meta;
 mod scanner;
 pub mod tagging;
 pub mod thumbnails;
+pub mod visibility;
 
 use std::borrow::Cow;
 use std::path::PathBuf;

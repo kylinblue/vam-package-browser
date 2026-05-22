@@ -71,7 +71,72 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v14_to_v15(&conn)?;
         conn.pragma_update(None, "user_version", 15)?;
     }
+    if current < 16 {
+        migrate_v15_to_v16(&conn)?;
+        conn.pragma_update(None, "user_version", 16)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
+    // Visibility presets / Load-Unload feature. Four tables:
+    //
+    //   visibility_presets             — named seed bags ("Looks I'm working on")
+    //   visibility_preset_creators     — author seeds, resolved fresh at closure time
+    //                                    against packages.creator (so new .vars by
+    //                                    a seeded author auto-join on next Load)
+    //   visibility_preset_packages     — explicit package seeds (hand-picked)
+    //   active_folder_state            — what's currently hardlinked into addon_root,
+    //                                    authoritative for diff/cleanup. Every row
+    //                                    is, by construction, an NTFS hardlink to the
+    //                                    matching managed_root file.
+    //
+    // The closure (= seeds ∪ transitive deps via package_dep_links) is computed
+    // on demand in visibility::compute_closure, not materialized into a table.
+    //
+    // See TODO-visibility-presets.md for the full design rationale, including
+    // why this changes the read-only invariant currently in CLAUDE.md
+    // (post-setup, managed_root is read-only; addon_root becomes the active
+    // folder). A CLAUDE-followup.md flags that change for a later doc commit.
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS visibility_presets (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at  INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS visibility_preset_creators (
+            preset_id INTEGER NOT NULL,
+            creator   TEXT NOT NULL,
+            PRIMARY KEY (preset_id, creator),
+            FOREIGN KEY (preset_id) REFERENCES visibility_presets(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS visibility_preset_packages (
+            preset_id  INTEGER NOT NULL,
+            package_id INTEGER NOT NULL,
+            PRIMARY KEY (preset_id, package_id),
+            FOREIGN KEY (preset_id)  REFERENCES visibility_presets(id) ON DELETE CASCADE,
+            FOREIGN KEY (package_id) REFERENCES packages(id)            ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS active_folder_state (
+            package_id      INTEGER PRIMARY KEY,
+            active_path     TEXT NOT NULL,
+            materialized_at INTEGER NOT NULL,
+            FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_preset_pkgs_pkg
+            ON visibility_preset_packages(package_id);
+        CREATE INDEX IF NOT EXISTS idx_preset_creators_cr
+            ON visibility_preset_creators(creator);
+        "#,
+    )?;
+    Ok(())
 }
 
 fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
