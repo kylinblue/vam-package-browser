@@ -5,6 +5,7 @@ import { DetailView } from "./components/DetailView";
 import { FacetPanel } from "./components/FacetPanel";
 import { HubSyncView } from "./components/HubSyncView";
 import { PackageGrid } from "./components/PackageGrid";
+import { StatsPanel } from "./components/StatsPanel";
 import { TypeChips } from "./components/TypeChips";
 import {
   countPackages,
@@ -72,6 +73,9 @@ export default function App() {
     }
     return localStorage.getItem("facetPanelOpen") === "1" ? "tagged" : "simple";
   });
+  const [statsPanelVisible, setStatsPanelVisible] = useState<boolean>(
+    () => localStorage.getItem("statsPanelVisible") === "1",
+  );
 
   // Size + date range filter inputs are kept as raw strings; empty = no bound.
   const [minSizeMb, setMinSizeMb] = useState("");
@@ -120,6 +124,10 @@ export default function App() {
     localStorage.setItem("viewMode", viewMode);
   }, [viewMode]);
 
+  useEffect(() => {
+    localStorage.setItem("statsPanelVisible", statsPanelVisible ? "1" : "0");
+  }, [statsPanelVisible]);
+
   // Re-snap tileSize when the viewport changes (e.g. window resize). Keeps
   // the column count stable in spirit — picks the nearest perfect-fit size
   // for the new width.
@@ -131,6 +139,40 @@ export default function App() {
   }, [viewportWidth]);
 
   const debouncedSearch = useDebounced(search, 80);
+
+  // Signature of every filter that the StatsPanel does NOT manage. Any
+  // change here resets the panel's navigation history — its breadcrumb of
+  // clicked filters only makes sense within a stable surrounding context.
+  // (Panel-managed axes: selectedType, selectedCreator, selectedHubCategory.)
+  const externalFilterSignature = useMemo(
+    () =>
+      JSON.stringify({
+        search: debouncedSearch,
+        tags: selectedTags,
+        min: minSizeMb,
+        max: maxSizeMb,
+        minD: minDate,
+        maxD: maxDate,
+        fav: favoritesOnly,
+        hidden: includeHidden,
+        noThumb: missingPreview,
+        err: errorsOnly,
+        view: viewMode,
+      }),
+    [
+      debouncedSearch,
+      selectedTags,
+      minSizeMb,
+      maxSizeMb,
+      minDate,
+      maxDate,
+      favoritesOnly,
+      includeHidden,
+      missingPreview,
+      errorsOnly,
+      viewMode,
+    ],
+  );
 
   // Client-side filter for the locally-mutated flags (errorsOnly is purely
   // client-side; the others mirror the backend filter so optimistic toggles
@@ -461,6 +503,14 @@ export default function App() {
             />
             <span>errors only</span>
           </label>
+          <label className="toolbar-toggle">
+            <input
+              type="checkbox"
+              checked={statsPanelVisible}
+              onChange={(e) => setStatsPanelVisible(e.target.checked)}
+            />
+            <span>📊 Stats</span>
+          </label>
 
           <label className="toolbar-sort">
             <span>Sort</span>
@@ -617,6 +667,21 @@ export default function App() {
           onFilterByType={(t) => setSelectedType(t as PackageType)}
           onViewportWidth={setViewportWidth}
         />
+        {statsPanelVisible && (
+          <StatsPanel
+            packages={visiblePackages}
+            totalMatched={totalMatched}
+            truncated={totalMatched > visiblePackages.length}
+            viewMode={viewMode}
+            selectedType={selectedType}
+            selectedCreator={selectedCreator}
+            selectedHubCategory={selectedHubCategory}
+            setSelectedType={setSelectedType}
+            setSelectedCreator={setSelectedCreator}
+            setSelectedHubCategory={setSelectedHubCategory}
+            externalFilterSignature={externalFilterSignature}
+          />
+        )}
       </div>
 
       {detailPackageId !== null && (

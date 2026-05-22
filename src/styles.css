@@ -1668,3 +1668,205 @@ html, body, #root {
   font-style: italic;
 }
 
+.stats-panel {
+  flex: 0 0 300px;
+  width: 300px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg-elev);
+  padding: 10px 10px 16px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 12px;
+}
+
+/* Section-default accent. Individual rows can override via an inline
+   `--row-accent` style (set in StatsPanel.tsx) so type families and the
+   size gradient can paint distinct hues *within* a section while the
+   author section inherits one hue throughout. */
+.stats-section-type { --row-accent: 122, 162, 255; }      /* blue */
+.stats-section-author { --row-accent: 140, 210, 160; }    /* soft green */
+.stats-section-size { --row-accent: 220, 180, 110; }      /* amber fallback */
+
+.stats-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stats-nav-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1.4;
+  min-width: 28px;
+}
+.stats-nav-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.stats-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.stats-nav-clear {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.stats-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stats-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.stats-summary-label {
+  color: var(--fg-dim);
+}
+
+.stats-summary-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.stats-truncated {
+  margin-top: 4px;
+  color: var(--fg-dim);
+  font-style: italic;
+  font-size: 11px;
+}
+
+.stats-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stats-section-title {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  padding: 2px 0 4px 0;
+}
+
+.stats-empty {
+  color: var(--fg-dim);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+.stats-row {
+  position: relative;
+  padding: 4px 6px;
+  border-radius: 3px;
+  isolation: isolate;
+}
+
+.stats-row-clickable {
+  cursor: pointer;
+}
+.stats-row-clickable:hover {
+  background: var(--tile-bg-hover);
+}
+.stats-row-clickable:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.stats-bar-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+  overflow: hidden;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.stats-bar-fill {
+  height: 100%;
+  background: rgba(var(--row-accent, 122, 162, 255), 0.16);
+}
+
+.stats-row-selected {
+  /* Left-edge marker in the row's accent hue (per-row override beats the
+     section default when --row-accent is set inline). */
+  box-shadow: inset 2px 0 0 0 rgba(var(--row-accent, 122, 162, 255), 0.9);
+}
+.stats-row-selected .stats-bar-fill {
+  background: rgba(var(--row-accent, 122, 162, 255), 0.3);
+}
+
+.stats-section-footer {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.stats-show-reset {
+  margin-left: auto;
+}
+
+.stats-row-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.stats-row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats-row-count {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.stats-row-pct {
+  font-size: 10px;
+  color: var(--fg-dim);
+  min-width: 28px;
+  text-align: right;
+}
+
+.stats-show-all {
+  margin-top: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.stats-show-all:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
