@@ -79,6 +79,19 @@ html, body, #root {
   white-space: nowrap;
 }
 
+/* Refresh button "liveness" pulse — applied transiently by App.tsx on
+   every hub-sync-progress event (throttled to 150 ms). The class is
+   removed + reflowed + re-added so the keyframe restarts from frame 0
+   on each event. CSS-only animation, no React state churn. */
+.refresh-btn.refresh-pulsing {
+  animation: refresh-pulse 0.6s ease-out;
+}
+@keyframes refresh-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(74, 158, 255, 0.55); border-color: rgba(74, 158, 255, 0.85); }
+  60%  { box-shadow: 0 0 0 6px rgba(74, 158, 255, 0);   border-color: rgba(74, 158, 255, 0.45); }
+  100% { box-shadow: 0 0 0 0 rgba(74, 158, 255, 0);    border-color: var(--border); }
+}
+
 /* App-level toast — lives at the app root so it survives child
    component unmounts (DetailView blanking out during a refetch, etc). */
 .toast {

@@ -122,6 +122,41 @@ export default function App() {
   // App-level toast — see components/Toast.tsx for the why-not-local rationale.
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
+  // Refresh button pulse on hub-sync-progress events. We restart the CSS
+  // animation via classList reset + reflow rather than React state to
+  // avoid re-rendering the toolbar 30+ times per second during peak sync
+  // event rates. Throttled to ≥150ms between pulses so very high event
+  // rates don't visually saturate (only the first frame of each pulse
+  // is informative anyway).
+  const refreshBtnRef = useRef<HTMLButtonElement | null>(null);
+  const lastPulseAtRef = useRef<number>(0);
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    (async () => {
+      const u = await listen("hub-sync-progress", () => {
+        if (cancelled) return;
+        const now = performance.now();
+        if (now - lastPulseAtRef.current < 150) return;
+        lastPulseAtRef.current = now;
+        const btn = refreshBtnRef.current;
+        if (!btn) return;
+        // Toggle the class off, force reflow, toggle back on. The reflow
+        // is what re-triggers the CSS keyframe from frame 0.
+        btn.classList.remove("refresh-pulsing");
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+        void btn.offsetWidth;
+        btn.classList.add("refresh-pulsing");
+      });
+      if (cancelled) u();
+      else unlisten = u;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Size + date range filter inputs are kept as raw strings; empty = no bound.
   const [minSizeMb, setMinSizeMb] = useState("");
   const [maxSizeMb, setMaxSizeMb] = useState("");
@@ -814,14 +849,15 @@ export default function App() {
             Clear filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
           <button
+            ref={refreshBtnRef}
             type="button"
-            className="toolbar-clear-filters"
+            className="toolbar-clear-filters refresh-btn"
             onClick={() => {
               loadResults();
               refreshTypeCountsAndCreators();
             }}
             disabled={loading}
-            title="Re-query the grid + chip aggregates. The grid auto-refreshes after every override action; this is a safety net if you ever see stale data."
+            title="Re-query the grid + chip aggregates. The grid auto-refreshes after every override action; this is a safety net if you ever see stale data. Pulses while a hub sync is running."
           >
             {loading ? "Refreshing…" : "Refresh"}
           </button>

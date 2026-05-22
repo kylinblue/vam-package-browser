@@ -114,6 +114,16 @@ export function HubSyncView() {
     return () => window.clearInterval(handle);
   }, [running, loadStatus]);
 
+  // Monotonic-progress guard. Three rayon workers fire progress events
+  // concurrently; Tauri's bridge from Rust → JS doesn't strictly preserve
+  // emit order across threads, so we can receive a snapshot where `done`
+  // is briefly smaller than a snapshot received moments earlier. That
+  // makes the percent bar twitch backward and feeds garbage into the
+  // rate-sample ring buffer. Drop any event whose `done` is below the
+  // high-water mark — the backend counters are increment-only, so a
+  // lower value is always out-of-order.
+  const maxDoneSeenRef = useRef<number>(0);
+
   // Subscribe to hub-sync-progress for live counters + rate sampling.
   // The `cancelled` flag handles React 18 StrictMode dev double-mount: if
   // the effect cleanup fires before the async listen() resolves, we'd
@@ -124,6 +134,13 @@ export function HubSyncView() {
     (async () => {
       const u = await listen<HubSyncProgress>("hub-sync-progress", (event) => {
         const p = event.payload;
+        // Drop out-of-order events; reset the high-water mark when a new
+        // sync starts (total changes, or done resets to a lower value
+        // alongside a fresh total).
+        if (p.done < maxDoneSeenRef.current && p.total > 0) {
+          return;
+        }
+        maxDoneSeenRef.current = p.done;
         setProgress(p);
 
         // Append to rate-sampling ring buffer.
@@ -210,6 +227,10 @@ export function HubSyncView() {
     setOpErr(null);
     setLastSummary(null);
     setProgress(null);
+    // Reset the monotonic-progress high-water mark so a fresh sync's
+    // initial low-`done` events aren't filtered as out-of-order.
+    maxDoneSeenRef.current = 0;
+    rateSamplesRef.current = [];
     const options: HubSyncOptions = {
       only_missing: onlyMissing,
       pull_preview_for_no_thumb: pullPreview,
