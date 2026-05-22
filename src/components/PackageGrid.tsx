@@ -251,18 +251,32 @@ function Tile({
   onToggleSelect,
 }: TileProps) {
   const filename = pkg.var_path.split(/[\\/]/).pop() ?? pkg.var_path;
-  // Hub-mode overrides: prefer hub_title / hub_category when available;
-  // fall back to local fields when the package isn't pinned. The boolean
-  // tells the JSX below which badge to render (heuristic emoji+text vs
-  // hub category text).
-  const useHub = displayMode === "hub" && !!pkg.hub_resource_id;
-  const displayTitle = useHub && pkg.hub_title ? pkg.hub_title : (pkg.package_name || filename);
-  const displayBadge = useHub && pkg.hub_category ? pkg.hub_category : pkg.package_type;
-  const isPaid = useHub && pkg.hub_billing_tier !== null && pkg.hub_billing_tier !== undefined;
-  const isOffsite = useHub && pkg.hub_is_hub_hosted === 0;
-  // "ghost" = in hub mode but no hub match → tile is dim so the user
-  // sees they're outside the hub-data picture for these.
-  const isHubGhost = displayMode === "hub" && !pkg.hub_resource_id;
+  // Hub-mode display rules:
+  //   - title/billing/hosted info still need a real pin (no point claiming
+  //     a hub title for a row that isn't linked).
+  //   - badge prefers hub_category whenever it's set — including user
+  //     overrides on unpinned rows. The user explicitly declared the
+  //     category, so showing the local heuristic instead would be wrong.
+  //   - "ghost" status (dimmed tile) loosens too: a user-set hub_category
+  //     counts as "this row has hub-side meaning", so it isn't ghosted.
+  const useHubPin = displayMode === "hub" && !!pkg.hub_resource_id;
+  const displayTitle = useHubPin && pkg.hub_title ? pkg.hub_title : (pkg.package_name || filename);
+  const displayBadge =
+    displayMode === "hub" && pkg.hub_category
+      ? pkg.hub_category
+      : pkg.package_type;
+  const isPaid = useHubPin && pkg.hub_billing_tier !== null && pkg.hub_billing_tier !== undefined;
+  const isOffsite = useHubPin && pkg.hub_is_hub_hosted === 0;
+  const isHubGhost =
+    displayMode === "hub" && !pkg.hub_resource_id && !pkg.hub_category;
+  // Whether the badge currently represents a user-locked classification —
+  // drives the "brighter" visual treatment + a small lock indicator. In
+  // Fetched mode we show hub_category (locked = hub_category_manual). In
+  // Simple/Tagged we show package_type (locked = package_type_manual).
+  const badgeIsLocked =
+    displayMode === "hub"
+      ? pkg.hub_category_manual === 1
+      : pkg.package_type_manual === 1;
   const items = categoryStrip(pkg);
   const itemsTooltip = items.map((i) => `${i.n} ${i.label}`).join(", ");
   const fullTitle = pkg.error
@@ -500,7 +514,25 @@ function Tile({
         </div>
         <div className="tile-name">{displayTitle}</div>
         <div className="tile-row">
-          <span className={`tile-type-badge ${useHub ? "tile-type-badge-hub" : ""}`}>{displayBadge}</span>
+          <span
+            className={[
+              "tile-type-badge",
+              displayMode === "hub" && pkg.hub_category
+                ? "tile-type-badge-hub"
+                : "",
+              badgeIsLocked ? "tile-type-badge-locked" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            title={
+              badgeIsLocked
+                ? `${displayBadge} (user-locked — won't be auto-changed)`
+                : displayBadge
+            }
+          >
+            {badgeIsLocked && <span className="tile-type-lock">🔒</span>}
+            {displayBadge}
+          </span>
           {isPaid && (
             <span
               className={`tile-paid-badge ${isOffsite ? "tile-paid-offsite" : ""}`}

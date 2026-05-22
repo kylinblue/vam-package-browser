@@ -1696,6 +1696,22 @@ html, body, #root {
   color: var(--fg);
 }
 
+/* Locked badge: the user has explicitly classified this package
+   (package_type override in Simple/Tagged, hub_category override in
+   Fetched). Render brighter than the default muted look so the
+   override status is obvious at grid-scan speed. */
+.tile-type-badge-locked {
+  background: rgba(122, 162, 255, 0.22);
+  border-color: rgba(122, 162, 255, 0.65);
+  color: var(--fg);
+  font-weight: 500;
+}
+.tile-type-lock {
+  margin-right: 2px;
+  font-size: 9px;
+  opacity: 0.85;
+}
+
 .tile-paid-badge {
   background: rgba(255, 192, 64, 0.15);
   border: 1px solid rgba(255, 192, 64, 0.45);
