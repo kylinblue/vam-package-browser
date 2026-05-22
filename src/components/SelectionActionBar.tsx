@@ -58,6 +58,10 @@ interface Props {
   /** Currently selected package ids. Bar renders only when non-empty
    *  (App.tsx gates the mount), so this is always |sel| >= 1. */
   selection: number[];
+  /** Drives the classify action — hub_category in Fetched mode, the
+   *  local heuristic package_type in Simple/Tagged. Same UI slot, mode
+   *  picks the backend command and the option list. */
+  viewMode: "simple" | "tagged" | "fetched";
   /** Tell App.tsx to clear the selection (after the user explicitly
    *  clears, or implicitly after a successful bulk action). */
   onClear: () => void;
@@ -74,22 +78,35 @@ type Feedback = { kind: "ok" | "error"; text: string } | null;
 
 export function SelectionActionBar({
   selection,
+  viewMode,
   onClear,
   onActionApplied,
   onSetVisibility,
 }: Props) {
+  const isFetched = viewMode === "fetched";
+  const classifyLabel = isFetched ? "Override category…" : "Override type…";
+  const classifyOptions: readonly string[] = isFetched
+    ? HUB_CATEGORIES
+    : PACKAGE_TYPES;
+
   const [mode, setMode] = useState<
-    "closed" | "pin" | "category" | "author" | "type"
+    "closed" | "pin" | "classify" | "author"
   >("closed");
   const [pinUrl, setPinUrl] = useState("");
-  const [category, setCategory] = useState("Scenes");
+  const [classifyDraft, setClassifyDraft] = useState<string>(
+    isFetched ? "Scenes" : "Scene",
+  );
   const [authorDraft, setAuthorDraft] = useState("");
-  const [packageTypeDraft, setPackageTypeDraft] =
-    useState<PackageType>("Scene");
-  const [busy, setBusy] = useState<
-    "pin" | "category" | "author" | "type" | null
-  >(null);
+  const [busy, setBusy] = useState<"pin" | "classify" | "author" | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
+
+  // Re-seed the draft + close the form on mode flip so the dropdown
+  // doesn't carry a stale value from the previous mode's option list.
+  useEffect(() => {
+    setClassifyDraft(isFetched ? "Scenes" : "Scene");
+    if (mode === "classify") setMode("closed");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFetched]);
 
   function reset() {
     setMode("closed");
@@ -138,58 +155,53 @@ export function SelectionActionBar({
     }
   }
 
-  async function handleCategory() {
-    if (!category || busy) return;
-    setBusy("category");
+  async function handleClassify() {
+    if (!classifyDraft || busy) return;
+    setBusy("classify");
     setFeedback(null);
     try {
-      const report: CategoryReport = await setHubCategory(selection, category);
-      const direct = report.directly_updated;
-      const sib = report.siblings_updated;
-      const msg =
-        sib > 0
-          ? `Updated category for ${direct} package${
-              direct === 1 ? "" : "s"
-            } and ${sib} sibling version${sib === 1 ? "" : "s"}. Auto-sync will keep this override.`
-          : `Updated category for ${direct} package${
-              direct === 1 ? "" : "s"
-            }. Auto-sync will keep this override.`;
+      let msg: string;
+      if (isFetched) {
+        const report: CategoryReport = await setHubCategory(
+          selection,
+          classifyDraft,
+        );
+        const direct = report.directly_updated;
+        const sib = report.siblings_updated;
+        msg =
+          sib > 0
+            ? `Updated category for ${direct} package${
+                direct === 1 ? "" : "s"
+              } and ${sib} sibling version${sib === 1 ? "" : "s"}. Auto-sync will keep this override.`
+            : `Updated category for ${direct} package${
+                direct === 1 ? "" : "s"
+              }. Auto-sync will keep this override.`;
+      } else {
+        const report: PackageTypeReport = await setPackageType(
+          selection,
+          classifyDraft as PackageType,
+        );
+        const direct = report.directly_updated;
+        const sib = report.siblings_updated;
+        msg =
+          sib > 0
+            ? `Set type to ${classifyDraft} for ${direct} package${
+                direct === 1 ? "" : "s"
+              } and ${sib} sibling version${
+                sib === 1 ? "" : "s"
+              }. Scanner will preserve this on rescan.`
+            : `Set type to ${classifyDraft} for ${direct} package${
+                direct === 1 ? "" : "s"
+              }. Scanner will preserve this on rescan.`;
+      }
       setFeedback({ kind: "ok", text: msg });
       reset();
       onActionApplied();
     } catch (e) {
-      setFeedback({ kind: "error", text: `Category error: ${e}` });
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handlePackageType() {
-    if (!packageTypeDraft || busy) return;
-    setBusy("type");
-    setFeedback(null);
-    try {
-      const report: PackageTypeReport = await setPackageType(
-        selection,
-        packageTypeDraft,
-      );
-      const direct = report.directly_updated;
-      const sib = report.siblings_updated;
-      const msg =
-        sib > 0
-          ? `Set type to ${packageTypeDraft} for ${direct} package${
-              direct === 1 ? "" : "s"
-            } and ${sib} sibling version${
-              sib === 1 ? "" : "s"
-            }. Scanner will preserve this on rescan.`
-          : `Set type to ${packageTypeDraft} for ${direct} package${
-              direct === 1 ? "" : "s"
-            }. Scanner will preserve this on rescan.`;
-      setFeedback({ kind: "ok", text: msg });
-      reset();
-      onActionApplied();
-    } catch (e) {
-      setFeedback({ kind: "error", text: `Type override error: ${e}` });
+      setFeedback({
+        kind: "error",
+        text: `${isFetched ? "Category" : "Type"} override error: ${e}`,
+      });
     } finally {
       setBusy(null);
     }
@@ -264,14 +276,19 @@ export function SelectionActionBar({
         </button>
         <button
           type="button"
-          className={`selection-bar-action ${mode === "category" ? "active" : ""}`}
+          className={`selection-bar-action ${mode === "classify" ? "active" : ""}`}
           onClick={() => {
-            setMode(mode === "category" ? "closed" : "category");
+            setMode(mode === "classify" ? "closed" : "classify");
             setFeedback(null);
           }}
           disabled={busy !== null}
+          title={
+            isFetched
+              ? "Override hub_category for selected packages — protected from auto-sync overwrites"
+              : "Override the local heuristic package_type — kept across rescans, propagates to sibling versions"
+          }
         >
-          Override category…
+          {classifyLabel}
         </button>
         <button
           type="button"
@@ -284,18 +301,6 @@ export function SelectionActionBar({
           title="Override the hub_author for selected packages. Propagates to every other package by the same creator(s) and protects against auto-sync overwrites."
         >
           Override author…
-        </button>
-        <button
-          type="button"
-          className={`selection-bar-action ${mode === "type" ? "active" : ""}`}
-          onClick={() => {
-            setMode(mode === "type" ? "closed" : "type");
-            setFeedback(null);
-          }}
-          disabled={busy !== null}
-          title="Override the local heuristic package_type. Sticks across rescans and propagates to sibling versions."
-        >
-          Override type…
         </button>
         <button
           type="button"
@@ -358,14 +363,14 @@ export function SelectionActionBar({
         </div>
       )}
 
-      {mode === "category" && (
+      {mode === "classify" && (
         <div className="selection-bar-form">
           <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            disabled={busy === "category"}
+            value={classifyDraft}
+            onChange={(e) => setClassifyDraft(e.target.value)}
+            disabled={busy === "classify"}
           >
-            {HUB_CATEGORIES.map((c) => (
+            {classifyOptions.map((c) => (
               <option key={c} value={c}>
                 {c}
               </option>
@@ -374,50 +379,16 @@ export function SelectionActionBar({
           <button
             type="button"
             className="selection-bar-action selection-bar-primary"
-            onClick={handleCategory}
-            disabled={busy === "category"}
+            onClick={handleClassify}
+            disabled={busy === "classify"}
           >
-            {busy === "category" ? "Applying…" : `Apply to ${n}`}
+            {busy === "classify" ? "Applying…" : `Apply to ${n}`}
           </button>
           <button
             type="button"
             className="selection-bar-action"
             onClick={reset}
-            disabled={busy === "category"}
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-
-      {mode === "type" && (
-        <div className="selection-bar-form">
-          <select
-            value={packageTypeDraft}
-            onChange={(e) =>
-              setPackageTypeDraft(e.target.value as PackageType)
-            }
-            disabled={busy === "type"}
-          >
-            {PACKAGE_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="selection-bar-action selection-bar-primary"
-            onClick={handlePackageType}
-            disabled={busy === "type"}
-          >
-            {busy === "type" ? "Applying…" : `Apply to ${n}`}
-          </button>
-          <button
-            type="button"
-            className="selection-bar-action"
-            onClick={reset}
-            disabled={busy === "type"}
+            disabled={busy === "classify"}
           >
             Cancel
           </button>

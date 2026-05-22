@@ -68,6 +68,25 @@ html, body, #root {
 }
 .toolbar-toggle input { cursor: pointer; }
 
+.toolbar-clear-filters {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.toolbar-clear-filters:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.toolbar-clear-filters:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .toolbar-range-group {
   display: inline-flex;
   align-items: center;

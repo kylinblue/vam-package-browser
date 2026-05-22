@@ -199,6 +199,56 @@ export default function App() {
     });
   }, [packages, errorsOnly, includeHidden, favoritesOnly]);
 
+  // Count of distinct filter axes currently set away from default. Drives
+  // the toolbar's Clear-filters button (label + disabled state). Excludes
+  // sort fields and `includeHidden` — sort is a view choice, not a filter,
+  // and `includeHidden=true` is permissive (a reset to `false` would be a
+  // surprising tightening). All the rest are "narrows the visible set"
+  // toggles or selectors.
+  const activeFilterCount = useMemo(() => {
+    let n = 0;
+    if (debouncedSearch) n++;
+    if (selectedType !== null) n++;
+    if (selectedCreator !== "") n++;
+    if (selectedHubCategory !== null) n++;
+    if (selectedTags.length > 0) n++;
+    if (favoritesOnly) n++;
+    if (missingPreview) n++;
+    if (errorsOnly) n++;
+    if (minSizeMb !== "" || maxSizeMb !== "") n++;
+    if (minDate !== "" || maxDate !== "") n++;
+    return n;
+  }, [
+    debouncedSearch,
+    selectedType,
+    selectedCreator,
+    selectedHubCategory,
+    selectedTags,
+    favoritesOnly,
+    missingPreview,
+    errorsOnly,
+    minSizeMb,
+    maxSizeMb,
+    minDate,
+    maxDate,
+  ]);
+  const hasActiveFilters = activeFilterCount > 0;
+
+  const clearAllFilters = useCallback(() => {
+    setSearch("");
+    setSelectedType(null);
+    setSelectedCreator("");
+    setSelectedHubCategory(null);
+    setSelectedTags([]);
+    setFavoritesOnly(false);
+    setMissingPreview(false);
+    setErrorsOnly(false);
+    setMinSizeMb("");
+    setMaxSizeMb("");
+    setMinDate("");
+    setMaxDate("");
+  }, []);
+
   // Tile click → selection mutator. Behavior:
   //   range=true (Shift)        — fill from selectionAnchor to id in the
   //                                current visiblePackages order. If the
@@ -566,6 +616,19 @@ export default function App() {
             />
             <span>📋 Select{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}</span>
           </label>
+          <button
+            type="button"
+            className="toolbar-clear-filters"
+            onClick={clearAllFilters}
+            disabled={!hasActiveFilters}
+            title={
+              hasActiveFilters
+                ? `Clear ${activeFilterCount} active filter${activeFilterCount === 1 ? "" : "s"}`
+                : "No active filters"
+            }
+          >
+            Clear filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </button>
 
           <label className="toolbar-sort">
             <span>Sort</span>
@@ -763,6 +826,7 @@ export default function App() {
       {selectedIds.size > 0 && (
         <SelectionActionBar
           selection={[...selectedIds]}
+          viewMode={viewMode}
           onClear={() => {
             setSelectedIds(new Set());
             setSelectionAnchor(null);

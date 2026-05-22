@@ -94,19 +94,10 @@ export function DetailView({
   const [error, setError] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [hoveredImage, setHoveredImage] = useState<string | null>(null);
-  // Bumped after a hub pin / category override succeeds to re-fetch the
-  // package detail with updated hub_* fields. Avoids stale data after the
-  // user performs an inline action.
+  // Bumped after a hub pin / category override / type override succeeds to
+  // re-fetch the package detail with updated fields. Avoids stale data
+  // after the user performs an inline action.
   const [reloadCounter, setReloadCounter] = useState(0);
-  // Local heuristic-type override picker (drives set_package_type).
-  // Lives at the DetailView level so it's available in any viewMode and
-  // for any package, matched or not. The picker is a small dropdown that
-  // appears inline next to the type chip in the subtitle row.
-  const [showTypePicker, setShowTypePicker] = useState(false);
-  const [typeBusy, setTypeBusy] = useState(false);
-  const [typeFeedback, setTypeFeedback] = useState<
-    { kind: "ok" | "error"; text: string } | null
-  >(null);
 
   // "Find similar" state shelved alongside the Ask UI — reactivation path
   // documented in App.tsx and TODO-semantic-search-ui.md.
@@ -134,31 +125,6 @@ export function DetailView({
   };
 
   const previewImage = hoveredImage ?? selectedImage;
-
-  async function applyTypeOverride(next: PackageType) {
-    if (typeBusy) return;
-    setTypeBusy(true);
-    setTypeFeedback(null);
-    try {
-      const report = await setPackageType([currentId], next);
-      const sib = report.siblings_updated;
-      setTypeFeedback({
-        kind: "ok",
-        text:
-          sib > 0
-            ? `Set type to ${next}. ${sib} sibling version${
-                sib === 1 ? "" : "s"
-              } updated. Scanner will preserve this on rescan.`
-            : `Set type to ${next}. Scanner will preserve this on rescan.`,
-      });
-      setShowTypePicker(false);
-      setReloadCounter((c) => c + 1);
-    } catch (e) {
-      setTypeFeedback({ kind: "error", text: `Type override failed: ${e}` });
-    } finally {
-      setTypeBusy(false);
-    }
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -266,41 +232,6 @@ export function DetailView({
                 >
                   {pkg.package_type}
                 </button>
-                {showTypePicker ? (
-                  <select
-                    className="detail-type-picker"
-                    value={pkg.package_type}
-                    onChange={(e) =>
-                      applyTypeOverride(e.target.value as PackageType)
-                    }
-                    onBlur={() => {
-                      // Close on outside click — gives the user an escape
-                      // hatch if they opened it by accident.
-                      if (!typeBusy) setShowTypePicker(false);
-                    }}
-                    disabled={typeBusy}
-                    autoFocus
-                  >
-                    {PACKAGE_TYPES.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <button
-                    type="button"
-                    className="detail-type-edit"
-                    onClick={() => {
-                      setShowTypePicker(true);
-                      setTypeFeedback(null);
-                    }}
-                    title="Override package type — kept across rescans"
-                    aria-label="Override package type"
-                  >
-                    ✏
-                  </button>
-                )}
                 <span>· {formatSize(pkg.file_size)}</span>
                 <span title="When this .var was last touched on disk">
                   · file {formatDate(pkg.file_mtime)}
@@ -314,13 +245,6 @@ export function DetailView({
                   <span>· VaM {pkg.program_version}</span>
                 )}
               </div>
-              {typeFeedback && (
-                <div
-                  className={`detail-type-feedback detail-type-feedback-${typeFeedback.kind}`}
-                >
-                  {typeFeedback.text}
-                </div>
-              )}
             </div>
 
             <div className="detail-body">
@@ -364,12 +288,11 @@ export function DetailView({
                   </section>
                 )}
 
-                {viewMode === "fetched" && (
-                  <HubInfoSection
-                    pkg={pkg}
-                    onReload={() => setReloadCounter((c) => c + 1)}
-                  />
-                )}
+                <HubInfoSection
+                  pkg={pkg}
+                  viewMode={viewMode}
+                  onReload={() => setReloadCounter((c) => c + 1)}
+                />
 
                 {viewMode === "tagged" && tags.length > 0 && (
                   <section>
@@ -488,11 +411,14 @@ const HUB_CATEGORIES: readonly string[] = [
 
 function HubInfoSection({
   pkg,
+  viewMode,
   onReload,
 }: {
   pkg: PackageRow;
+  viewMode: "simple" | "tagged" | "fetched";
   onReload: () => void;
 }) {
+  const isFetched = viewMode === "fetched";
   const isMatched = pkg.hub_resource_id != null;
   const isOffsite = pkg.hub_is_hub_hosted === 0;
   const tier = pkg.hub_billing_tier ?? "free";
@@ -503,19 +429,41 @@ function HubInfoSection({
         ? "Paid"
         : "Free";
 
+  // The "Override category/type" button consolidates two backend axes
+  // under one slot: in Fetched mode it sets hub_category (the axis driving
+  // the toolbar's HubCategoryChips); in Simple/Tagged it sets the local
+  // heuristic package_type (the axis driving TypeChips). One button, two
+  // commands, picked per current view.
+  const classifyLabel = isFetched ? "Override category…" : "Override type…";
+  const classifyOptions: readonly string[] = isFetched
+    ? HUB_CATEGORIES
+    : PACKAGE_TYPES;
+  const classifyCurrent = isFetched
+    ? pkg.hub_category ?? "Scenes"
+    : pkg.package_type;
+
   // Inline action state. Kept local to the section so reopening DetailView
   // resets everything cleanly (the section unmounts with the modal).
   const [showPin, setShowPin] = useState(false);
   const [pinUrl, setPinUrl] = useState("");
-  const [busy, setBusy] = useState<"pin" | "category" | "author" | null>(null);
+  const [busy, setBusy] = useState<"pin" | "classify" | "author" | null>(null);
   const [feedback, setFeedback] = useState<{
     kind: "ok" | "error";
     text: string;
   } | null>(null);
-  const [showCategory, setShowCategory] = useState(false);
-  const [categoryDraft, setCategoryDraft] = useState(pkg.hub_category ?? "Scenes");
+  const [showClassify, setShowClassify] = useState(false);
+  const [classifyDraft, setClassifyDraft] = useState<string>(classifyCurrent);
   const [showAuthor, setShowAuthor] = useState(false);
   const [authorDraft, setAuthorDraft] = useState(pkg.hub_author ?? "");
+
+  // Keep the dropdown's initial selection in sync with the current axis
+  // when the user flips viewMode while the section is mounted (e.g.
+  // opening DetailView in Simple then switching to Fetched).
+  useEffect(() => {
+    setClassifyDraft(classifyCurrent);
+    setShowClassify(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFetched, pkg.package_type, pkg.hub_category]);
 
   async function handlePin() {
     if (!pinUrl.trim() || busy) return;
@@ -554,24 +502,42 @@ function HubInfoSection({
     }
   }
 
-  async function handleCategory() {
-    if (!categoryDraft || busy) return;
-    setBusy("category");
+  async function handleClassify() {
+    if (!classifyDraft || busy) return;
+    setBusy("classify");
     setFeedback(null);
     try {
-      const report = await setHubCategory([pkg.id], categoryDraft);
-      const sib = report.siblings_updated;
-      const msg =
-        sib > 0
-          ? `Updated category for ${report.directly_updated} package${
-              report.directly_updated === 1 ? "" : "s"
-            } and ${sib} sibling version${sib === 1 ? "" : "s"}. Auto-sync will keep this override.`
-          : "Updated category. Auto-sync will keep this override.";
+      let msg: string;
+      if (isFetched) {
+        const report = await setHubCategory([pkg.id], classifyDraft);
+        const sib = report.siblings_updated;
+        msg =
+          sib > 0
+            ? `Updated category for ${report.directly_updated} package${
+                report.directly_updated === 1 ? "" : "s"
+              } and ${sib} sibling version${sib === 1 ? "" : "s"}. Auto-sync will keep this override.`
+            : "Updated category. Auto-sync will keep this override.";
+      } else {
+        const report = await setPackageType(
+          [pkg.id],
+          classifyDraft as PackageType,
+        );
+        const sib = report.siblings_updated;
+        msg =
+          sib > 0
+            ? `Set type to ${classifyDraft}. ${sib} sibling version${
+                sib === 1 ? "" : "s"
+              } updated. Scanner will preserve this on rescan.`
+            : `Set type to ${classifyDraft}. Scanner will preserve this on rescan.`;
+      }
       setFeedback({ kind: "ok", text: msg });
-      setShowCategory(false);
+      setShowClassify(false);
       onReload();
     } catch (e) {
-      setFeedback({ kind: "error", text: `Category error: ${e}` });
+      setFeedback({
+        kind: "error",
+        text: `${isFetched ? "Category" : "Type"} override error: ${e}`,
+      });
     } finally {
       setBusy(null);
     }
@@ -602,39 +568,48 @@ function HubInfoSection({
 
   return (
     <section className="detail-hub-info">
-      <h4>Hub</h4>
-      {isMatched ? (
-        <>
-          <div className="detail-hub-title">{pkg.hub_title ?? "(metadata pending)"}</div>
-          <div className="detail-hub-meta">
-            <span className={`hub-tier-badge hub-tier-${tier.replace(/[^a-z-]/g, "")}`}>
-              {tierLabel}
-            </span>
-            {pkg.hub_category && (
-              <span className="hub-tier-badge hub-tier-category">{pkg.hub_category}</span>
-            )}
-            {pkg.hub_license && (
-              <span className="hub-tier-badge hub-tier-license">{pkg.hub_license}</span>
-            )}
-            {pkg.hub_match_method && (
+      <h4>{isFetched ? "Hub" : "Overrides"}</h4>
+      {isFetched &&
+        (isMatched ? (
+          <>
+            <div className="detail-hub-title">
+              {pkg.hub_title ?? "(metadata pending)"}
+            </div>
+            <div className="detail-hub-meta">
               <span
-                className={`hub-tier-badge hub-tier-method hub-tier-method-${pkg.hub_match_method}`}
-                title={methodTooltip(pkg.hub_match_method)}
+                className={`hub-tier-badge hub-tier-${tier.replace(/[^a-z-]/g, "")}`}
               >
-                via {pkg.hub_match_method}
+                {tierLabel}
               </span>
-            )}
+              {pkg.hub_category && (
+                <span className="hub-tier-badge hub-tier-category">
+                  {pkg.hub_category}
+                </span>
+              )}
+              {pkg.hub_license && (
+                <span className="hub-tier-badge hub-tier-license">
+                  {pkg.hub_license}
+                </span>
+              )}
+              {pkg.hub_match_method && (
+                <span
+                  className={`hub-tier-badge hub-tier-method hub-tier-method-${pkg.hub_match_method}`}
+                  title={methodTooltip(pkg.hub_match_method)}
+                >
+                  via {pkg.hub_match_method}
+                </span>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="detail-hub-empty">
+            Not linked to a hub resource. Pin a URL below to establish the
+            link; metadata fills in on the next sync.
           </div>
-        </>
-      ) : (
-        <div className="detail-hub-empty">
-          Not linked to a hub resource. Pin a URL below to establish the link;
-          metadata fills in on the next sync.
-        </div>
-      )}
+        ))}
 
       <div className="detail-action-row">
-        {pkg.hub_url && (
+        {isFetched && pkg.hub_url && (
           <button
             type="button"
             className="detail-action"
@@ -643,7 +618,7 @@ function HubInfoSection({
             Open on hub
           </button>
         )}
-        {isOffsite && pkg.hub_external_url && (
+        {isFetched && isOffsite && pkg.hub_external_url && (
           <button
             type="button"
             className="detail-action"
@@ -653,40 +628,44 @@ function HubInfoSection({
             Buy at source ↗
           </button>
         )}
-        <button
-          type="button"
-          className="detail-action"
-          onClick={() => {
-            setShowPin((v) => !v);
-            setShowCategory(false);
-            setShowAuthor(false);
-            setFeedback(null);
-          }}
-        >
-          {isMatched ? "Pin to different URL…" : "Pin to hub URL…"}
-        </button>
-        {isMatched && (
+        {isFetched && (
           <button
             type="button"
             className="detail-action"
             onClick={() => {
-              setShowCategory((v) => !v);
-              setShowPin(false);
+              setShowPin((v) => !v);
+              setShowClassify(false);
               setShowAuthor(false);
               setFeedback(null);
             }}
-            title="Override the hub_category for this package — protected from auto-sync overwrites"
           >
-            Override category…
+            {isMatched ? "Pin to different URL…" : "Pin to hub URL…"}
           </button>
         )}
         <button
           type="button"
           className="detail-action"
           onClick={() => {
+            setShowClassify((v) => !v);
+            setShowPin(false);
+            setShowAuthor(false);
+            setFeedback(null);
+          }}
+          title={
+            isFetched
+              ? "Override the hub_category for this package — protected from auto-sync overwrites"
+              : "Override the local package_type — kept across rescans, propagates to sibling versions"
+          }
+        >
+          {classifyLabel}
+        </button>
+        <button
+          type="button"
+          className="detail-action"
+          onClick={() => {
             setShowAuthor((v) => !v);
             setShowPin(false);
-            setShowCategory(false);
+            setShowClassify(false);
             setFeedback(null);
           }}
           title={`Set the canonical hub author for ${pkg.creator || "this creator"}. Propagates to every other package by the same creator and is protected from auto-sync overwrites.`}
@@ -731,14 +710,14 @@ function HubInfoSection({
         </div>
       )}
 
-      {showCategory && (
+      {showClassify && (
         <div className="detail-hub-pin-row">
           <select
-            value={categoryDraft}
-            onChange={(e) => setCategoryDraft(e.target.value)}
-            disabled={busy === "category"}
+            value={classifyDraft}
+            onChange={(e) => setClassifyDraft(e.target.value)}
+            disabled={busy === "classify"}
           >
-            {HUB_CATEGORIES.map((c) => (
+            {classifyOptions.map((c) => (
               <option key={c} value={c}>
                 {c}
               </option>
@@ -747,16 +726,16 @@ function HubInfoSection({
           <button
             type="button"
             className="detail-action detail-action-primary"
-            onClick={handleCategory}
-            disabled={busy === "category"}
+            onClick={handleClassify}
+            disabled={busy === "classify"}
           >
-            {busy === "category" ? "Applying…" : "Apply"}
+            {busy === "classify" ? "Applying…" : "Apply"}
           </button>
           <button
             type="button"
             className="detail-action"
-            onClick={() => setShowCategory(false)}
-            disabled={busy === "category"}
+            onClick={() => setShowClassify(false)}
+            disabled={busy === "classify"}
           >
             Cancel
           </button>
