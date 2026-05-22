@@ -551,3 +551,26 @@ export async function setHubAuthor(
 ): Promise<AuthorReport> {
   return invoke<AuthorReport>("set_hub_author", { packageIds, hubAuthor });
 }
+
+export interface PackageTypeReport {
+  /** Rows the caller explicitly selected. */
+  directly_updated: number;
+  /** Sibling versions (same creator + package_name) that picked up the
+   *  override via propagation. Disjoint from `directly_updated`. */
+  siblings_updated: number;
+}
+
+/** Bulk-override the local heuristic `package_type` for selected
+ *  packages + their version-siblings. Sets `package_type_manual = 1`
+ *  so the scanner leaves the override alone on rescan. Useful when a
+ *  package's contentList spans categories and the scanner labels it
+ *  "Mixed" but the user knows it's effectively a Scene / Look / Plugin. */
+export async function setPackageType(
+  packageIds: number[],
+  packageType: PackageType,
+): Promise<PackageTypeReport> {
+  return invoke<PackageTypeReport>("set_package_type", {
+    packageIds,
+    packageType,
+  });
+}

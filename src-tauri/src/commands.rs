@@ -3438,6 +3438,114 @@ pub async fn set_hub_author(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+#[derive(Debug, Default, Serialize)]
+pub struct PackageTypeReport {
+    /// Rows the caller explicitly selected. */
+    pub directly_updated: i64,
+    /// Sibling versions of the same (creator, package_name) that picked
+    /// up the override via propagation. Disjoint from `directly_updated`.
+    pub siblings_updated: i64,
+}
+
+/// One of the canonical PackageType enum values. Validated server-side
+/// so the frontend can't write garbage into the column. Mirrors the
+/// frontend `PackageType` TS union.
+const PACKAGE_TYPE_VALUES: &[&str] = &[
+    "Scene",
+    "Look",
+    "Morph",
+    "Texture",
+    "Clothing",
+    "Hair",
+    "Plugin",
+    "Asset",
+    "Pose",
+    "Sound",
+    "SubScene",
+    "Mixed",
+    "Unknown",
+];
+
+/// Bulk-override the local heuristic `package_type` for one or more
+/// packages and their version-siblings (same creator + package_name).
+/// Sets `package_type_manual = 1` so subsequent rescans leave the
+/// override alone.
+///
+/// Use case: a package's contentList spans multiple categories and the
+/// scanner labels it "Mixed", but the user knows it's effectively a
+/// Scene (or Look, Plugin, etc.) — and wants it filterable as such.
+///
+/// Propagation scope is package-wide (same creator + package_name across
+/// versions). Unconditional within that scope: the user has declared
+/// what the package IS, which applies across versions regardless of how
+/// each version's contentList parsed. (Auto-classification has no
+/// "confirmed match" concept the way hub matches do, so no protection
+/// guard is needed for siblings.)
+#[tauri::command]
+pub async fn set_package_type(
+    state: State<'_, AppState>,
+    package_ids: Vec<i64>,
+    package_type: String,
+) -> Result<PackageTypeReport, String> {
+    if package_ids.is_empty() {
+        return Err("no package ids supplied".to_string());
+    }
+    if !PACKAGE_TYPE_VALUES.contains(&package_type.as_str()) {
+        return Err(format!(
+            "invalid package_type: {package_type} (expected one of: {})",
+            PACKAGE_TYPE_VALUES.join(", ")
+        ));
+    }
+    let db = state.db.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<PackageTypeReport, String> {
+        let mut conn = db.lock();
+        let tx = conn.transaction().map_err(|e| format!("tx open: {e}"))?;
+        let mut report = PackageTypeReport::default();
+
+        for &package_id in &package_ids {
+            let r = tx.execute(
+                "UPDATE packages
+                 SET package_type = ?1, package_type_manual = 1
+                 WHERE id = ?2",
+                params![&package_type, package_id],
+            );
+            match r {
+                Ok(1) => {
+                    report.directly_updated += 1;
+                    // Sibling propagation — same creator + package_name
+                    // across versions. Unconditional within scope.
+                    let prop = tx.execute(
+                        "UPDATE packages
+                         SET package_type = ?1, package_type_manual = 1
+                         WHERE id != ?2
+                           AND creator      = (SELECT creator      FROM packages WHERE id = ?2)
+                           AND package_name = (SELECT package_name FROM packages WHERE id = ?2)",
+                        params![&package_type, package_id],
+                    );
+                    match prop {
+                        Ok(n) => report.siblings_updated += n as i64,
+                        Err(e) => eprintln!(
+                            "set_package_type: sibling propagate failed for id {package_id}: {e}"
+                        ),
+                    }
+                }
+                Ok(_) => {
+                    eprintln!("set_package_type: id {package_id} not found");
+                }
+                Err(e) => {
+                    eprintln!("set_package_type: id {package_id} failed: {e}");
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| format!("tx commit: {e}"))?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 #[cfg(test)]
 mod pin_input_tests {
     use super::parse_hub_pin_input;

@@ -79,7 +79,31 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v16_to_v17(&conn)?;
         conn.pragma_update(None, "user_version", 17)?;
     }
+    if current < 18 {
+        migrate_v17_to_v18(&conn)?;
+        conn.pragma_update(None, "user_version", 18)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
+    // Companion to v16/v17's manual-flag pattern, but for the LOCAL
+    // heuristic classification rather than a hub field. `package_type` is
+    // determined by the scanner from contentList path prefixes — it's
+    // often Mixed/Unknown for packages whose content spans multiple
+    // categories, which makes filtering frustrating. The user knows the
+    // dominant content; let them override and have it stick across
+    // rescans.
+    //
+    // `package_type_manual = 1` means "don't reclassify on rescan". The
+    // scanner's package upsert uses a CASE expression to preserve the
+    // override when the flag is set.
+    conn.execute_batch(
+        r#"
+        ALTER TABLE packages ADD COLUMN package_type_manual INTEGER DEFAULT 0;
+        "#,
+    )?;
+    Ok(())
 }
 
 fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {

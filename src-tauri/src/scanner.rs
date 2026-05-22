@@ -101,7 +101,13 @@ pub fn scan(
                 license         = excluded.license,
                 program_version = excluded.program_version,
                 description     = excluded.description,
-                package_type    = excluded.package_type,
+                -- Preserve a user-set package_type override across rescans.
+                -- The scanner always proposes its heuristic classification
+                -- (`excluded.package_type`), but if the user has flagged a
+                -- manual override, we keep what's already in the row.
+                package_type    = CASE WHEN package_type_manual = 1
+                                       THEN package_type
+                                       ELSE excluded.package_type END,
                 content_count   = excluded.content_count,
                 dep_count       = excluded.dep_count,
                 has_preview     = excluded.has_preview,

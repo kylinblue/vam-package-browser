@@ -3,10 +3,32 @@ import {
   setHubAuthor,
   setHubCategory,
   setHubPin,
+  setPackageType,
   type AuthorReport,
   type CategoryReport,
+  type PackageType,
+  type PackageTypeReport,
   type PinReport,
 } from "../lib/api";
+
+/** Local heuristic-type values — mirrors PACKAGE_TYPE_VALUES in
+ *  commands.rs and PACKAGE_TYPES in DetailView. Used by the override
+ *  dropdown. */
+const PACKAGE_TYPES: readonly PackageType[] = [
+  "Scene",
+  "Look",
+  "Morph",
+  "Texture",
+  "Clothing",
+  "Hair",
+  "Plugin",
+  "Asset",
+  "Pose",
+  "Sound",
+  "SubScene",
+  "Mixed",
+  "Unknown",
+];
 
 /** Mirrors HubCategoryChips' canonical list. Duplicated here rather than
  *  imported to keep the action bar self-contained — both lists are tiny. */
@@ -56,13 +78,17 @@ export function SelectionActionBar({
   onActionApplied,
   onSetVisibility,
 }: Props) {
-  const [mode, setMode] = useState<"closed" | "pin" | "category" | "author">(
-    "closed",
-  );
+  const [mode, setMode] = useState<
+    "closed" | "pin" | "category" | "author" | "type"
+  >("closed");
   const [pinUrl, setPinUrl] = useState("");
   const [category, setCategory] = useState("Scenes");
   const [authorDraft, setAuthorDraft] = useState("");
-  const [busy, setBusy] = useState<"pin" | "category" | "author" | null>(null);
+  const [packageTypeDraft, setPackageTypeDraft] =
+    useState<PackageType>("Scene");
+  const [busy, setBusy] = useState<
+    "pin" | "category" | "author" | "type" | null
+  >(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
   function reset() {
@@ -133,6 +159,37 @@ export function SelectionActionBar({
       onActionApplied();
     } catch (e) {
       setFeedback({ kind: "error", text: `Category error: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handlePackageType() {
+    if (!packageTypeDraft || busy) return;
+    setBusy("type");
+    setFeedback(null);
+    try {
+      const report: PackageTypeReport = await setPackageType(
+        selection,
+        packageTypeDraft,
+      );
+      const direct = report.directly_updated;
+      const sib = report.siblings_updated;
+      const msg =
+        sib > 0
+          ? `Set type to ${packageTypeDraft} for ${direct} package${
+              direct === 1 ? "" : "s"
+            } and ${sib} sibling version${
+              sib === 1 ? "" : "s"
+            }. Scanner will preserve this on rescan.`
+          : `Set type to ${packageTypeDraft} for ${direct} package${
+              direct === 1 ? "" : "s"
+            }. Scanner will preserve this on rescan.`;
+      setFeedback({ kind: "ok", text: msg });
+      reset();
+      onActionApplied();
+    } catch (e) {
+      setFeedback({ kind: "error", text: `Type override error: ${e}` });
     } finally {
       setBusy(null);
     }
@@ -230,6 +287,18 @@ export function SelectionActionBar({
         </button>
         <button
           type="button"
+          className={`selection-bar-action ${mode === "type" ? "active" : ""}`}
+          onClick={() => {
+            setMode(mode === "type" ? "closed" : "type");
+            setFeedback(null);
+          }}
+          disabled={busy !== null}
+          title="Override the local heuristic package_type. Sticks across rescans and propagates to sibling versions."
+        >
+          Override type…
+        </button>
+        <button
+          type="button"
           className="selection-bar-action"
           onClick={() => onSetVisibility?.(selection)}
           disabled={!onSetVisibility}
@@ -315,6 +384,40 @@ export function SelectionActionBar({
             className="selection-bar-action"
             onClick={reset}
             disabled={busy === "category"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {mode === "type" && (
+        <div className="selection-bar-form">
+          <select
+            value={packageTypeDraft}
+            onChange={(e) =>
+              setPackageTypeDraft(e.target.value as PackageType)
+            }
+            disabled={busy === "type"}
+          >
+            {PACKAGE_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="selection-bar-action selection-bar-primary"
+            onClick={handlePackageType}
+            disabled={busy === "type"}
+          >
+            {busy === "type" ? "Applying…" : `Apply to ${n}`}
+          </button>
+          <button
+            type="button"
+            className="selection-bar-action"
+            onClick={reset}
+            disabled={busy === "type"}
           >
             Cancel
           </button>

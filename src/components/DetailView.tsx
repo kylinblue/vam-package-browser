@@ -9,6 +9,7 @@ import {
   setHubAuthor,
   setHubCategory,
   setHubPin,
+  setPackageType,
   subThumbUrl,
   thumbUrl,
   vamHubAuthorSearchUrl,
@@ -17,8 +18,27 @@ import {
   type PackageDetail,
   type PackageRelationships,
   type PackageRow,
+  type PackageType,
   type RelatedPackage,
 } from "../lib/api";
+
+/** Canonical local PackageType list — mirrors the Rust PACKAGE_TYPE_VALUES
+ *  constant in commands.rs. Used by the override dropdown. */
+const PACKAGE_TYPES: readonly PackageType[] = [
+  "Scene",
+  "Look",
+  "Morph",
+  "Texture",
+  "Clothing",
+  "Hair",
+  "Plugin",
+  "Asset",
+  "Pose",
+  "Sound",
+  "SubScene",
+  "Mixed",
+  "Unknown",
+];
 import { TagChips } from "./TagChips";
 
 interface Props {
@@ -78,6 +98,15 @@ export function DetailView({
   // package detail with updated hub_* fields. Avoids stale data after the
   // user performs an inline action.
   const [reloadCounter, setReloadCounter] = useState(0);
+  // Local heuristic-type override picker (drives set_package_type).
+  // Lives at the DetailView level so it's available in any viewMode and
+  // for any package, matched or not. The picker is a small dropdown that
+  // appears inline next to the type chip in the subtitle row.
+  const [showTypePicker, setShowTypePicker] = useState(false);
+  const [typeBusy, setTypeBusy] = useState(false);
+  const [typeFeedback, setTypeFeedback] = useState<
+    { kind: "ok" | "error"; text: string } | null
+  >(null);
 
   // "Find similar" state shelved alongside the Ask UI — reactivation path
   // documented in App.tsx and TODO-semantic-search-ui.md.
@@ -105,6 +134,31 @@ export function DetailView({
   };
 
   const previewImage = hoveredImage ?? selectedImage;
+
+  async function applyTypeOverride(next: PackageType) {
+    if (typeBusy) return;
+    setTypeBusy(true);
+    setTypeFeedback(null);
+    try {
+      const report = await setPackageType([currentId], next);
+      const sib = report.siblings_updated;
+      setTypeFeedback({
+        kind: "ok",
+        text:
+          sib > 0
+            ? `Set type to ${next}. ${sib} sibling version${
+                sib === 1 ? "" : "s"
+              } updated. Scanner will preserve this on rescan.`
+            : `Set type to ${next}. Scanner will preserve this on rescan.`,
+      });
+      setShowTypePicker(false);
+      setReloadCounter((c) => c + 1);
+    } catch (e) {
+      setTypeFeedback({ kind: "error", text: `Type override failed: ${e}` });
+    } finally {
+      setTypeBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -212,6 +266,41 @@ export function DetailView({
                 >
                   {pkg.package_type}
                 </button>
+                {showTypePicker ? (
+                  <select
+                    className="detail-type-picker"
+                    value={pkg.package_type}
+                    onChange={(e) =>
+                      applyTypeOverride(e.target.value as PackageType)
+                    }
+                    onBlur={() => {
+                      // Close on outside click — gives the user an escape
+                      // hatch if they opened it by accident.
+                      if (!typeBusy) setShowTypePicker(false);
+                    }}
+                    disabled={typeBusy}
+                    autoFocus
+                  >
+                    {PACKAGE_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <button
+                    type="button"
+                    className="detail-type-edit"
+                    onClick={() => {
+                      setShowTypePicker(true);
+                      setTypeFeedback(null);
+                    }}
+                    title="Override package type — kept across rescans"
+                    aria-label="Override package type"
+                  >
+                    ✏
+                  </button>
+                )}
                 <span>· {formatSize(pkg.file_size)}</span>
                 <span title="When this .var was last touched on disk">
                   · file {formatDate(pkg.file_mtime)}
@@ -225,6 +314,13 @@ export function DetailView({
                   <span>· VaM {pkg.program_version}</span>
                 )}
               </div>
+              {typeFeedback && (
+                <div
+                  className={`detail-type-feedback detail-type-feedback-${typeFeedback.kind}`}
+                >
+                  {typeFeedback.text}
+                </div>
+              )}
             </div>
 
             <div className="detail-body">
