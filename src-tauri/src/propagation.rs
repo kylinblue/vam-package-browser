@@ -149,17 +149,23 @@ pub fn propagate_hub_match(conn: &Connection, src_row_id: i64) -> Result<Propaga
     // hub_* fields are resource-specific and don't generalize across
     // packages.
     //
-    // Same NULL|inherit guard. Last-write-wins on the rare case where two
-    // different packages by the same creator pinned to resources with
-    // diverging hub_author display strings — we don't try to reconcile,
-    // we just reflect the latest pin's view.
+    // Two guards apply:
+    //   (a) NULL|inherit hub_match_method — same protection as Tier 1
+    //   (b) hub_author_manual = 0 — a user-locked author display name
+    //       takes precedence over any propagation source. Both v17+.
+    //
+    // Last-write-wins among soft rows on the rare case where two
+    // different packages by the same creator pin to resources with
+    // diverging hub_author strings — we don't reconcile, just reflect
+    // the latest pin's view.
     let authors_updated = if let Some(ref hub_author) = src.hub_author {
         conn.execute(
             "UPDATE packages SET hub_author = ?1
              WHERE creator = ?2
                AND id != ?3
                AND package_name != ?4
-               AND (hub_match_method IS NULL OR hub_match_method = 'inherit')",
+               AND (hub_match_method IS NULL OR hub_match_method = 'inherit')
+               AND hub_author_manual = 0",
             params![hub_author, &src.creator, src_row_id, &src.package_name],
         )? as i64
     } else {
@@ -219,7 +225,8 @@ mod tests {
                 hub_synced_at INTEGER,
                 hub_sync_state TEXT,
                 hub_match_method TEXT,
-                hub_category_manual INTEGER DEFAULT 0
+                hub_category_manual INTEGER DEFAULT 0,
+                hub_author_manual INTEGER DEFAULT 0
             );
             "#,
         )
@@ -238,14 +245,16 @@ mod tests {
         hub_category: Option<&'a str>,
         hub_match_method: Option<&'a str>,
         hub_category_manual: i64,
+        hub_author_manual: i64,
     }
 
     fn insert(conn: &Connection, r: Row) {
         conn.execute(
             "INSERT INTO packages
                (id, creator, package_name, hub_resource_id, hub_author,
-                hub_category, hub_match_method, hub_category_manual)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                hub_category, hub_match_method, hub_category_manual,
+                hub_author_manual)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 r.id,
                 r.creator,
@@ -255,6 +264,7 @@ mod tests {
                 r.hub_category,
                 r.hub_match_method,
                 r.hub_category_manual,
+                r.hub_author_manual,
             ],
         )
         .unwrap();
@@ -412,6 +422,42 @@ mod tests {
         assert_eq!(author_of(&conn, 2).as_deref(), Some("TAuthor"));
         assert_eq!(author_of(&conn, 3).as_deref(), Some("DifferentName")); // protected
         assert_eq!(author_of(&conn, 4), None);
+    }
+
+    /// A row with hub_author_manual=1 protects its hub_author from
+    /// author-wide propagation, even when the row is otherwise in the
+    /// soft state (NULL or 'inherit' match method).
+    #[test]
+    fn author_wide_respects_hub_author_manual() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema(&conn);
+        insert(&conn, Row {
+            id: 1, creator: "testAuthor", package_name: "Foo",
+            hub_resource_id: Some(42), hub_author: Some("TAuthorHub"),
+            hub_match_method: Some("manual"),
+            ..Default::default()
+        });
+        // Other package by same creator with user-locked author display.
+        // Soft state (hub_match_method NULL), so guard (a) would otherwise
+        // allow the backfill — but the manual flag overrides.
+        insert(&conn, Row {
+            id: 2, creator: "testAuthor", package_name: "Bar",
+            hub_author: Some("UserPreferredName"),
+            hub_author_manual: 1,
+            ..Default::default()
+        });
+        // Control: same creator, soft state, no manual flag → does
+        // receive the backfill (so we know the propagation actually
+        // ran and we're not just observing a global skip).
+        insert(&conn, Row {
+            id: 3, creator: "testAuthor", package_name: "Baz",
+            ..Default::default()
+        });
+
+        let report = propagate_hub_match(&conn, 1).unwrap();
+        assert_eq!(report.authors_updated, 1); // id=3 only
+        assert_eq!(author_of(&conn, 2).as_deref(), Some("UserPreferredName"));
+        assert_eq!(author_of(&conn, 3).as_deref(), Some("TAuthorHub"));
     }
 
     /// Author-wide is a no-op when the source row has no hub_author.

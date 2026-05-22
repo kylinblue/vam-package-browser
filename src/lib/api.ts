@@ -531,3 +531,23 @@ export async function setHubCategory(
 ): Promise<CategoryReport> {
   return invoke<CategoryReport>("set_hub_category", { packageIds, category });
 }
+
+export interface AuthorReport {
+  /** Rows the caller explicitly selected. */
+  directly_updated: number;
+  /** Other rows by the same creator(s) reached via author-wide
+   *  propagation. Disjoint from `directly_updated`. */
+  authors_updated: number;
+}
+
+/** Bulk-override `hub_author` for selected packages AND every other
+ *  package by the same creator(s). Sets `hub_author_manual = 1` on every
+ *  touched row so subsequent hub-syncs leave the override alone — useful
+ *  when the hub's displayed author name differs from how the user wants
+ *  the creator identified. */
+export async function setHubAuthor(
+  packageIds: number[],
+  hubAuthor: string,
+): Promise<AuthorReport> {
+  return invoke<AuthorReport>("set_hub_author", { packageIds, hubAuthor });
+}

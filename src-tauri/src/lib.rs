@@ -155,6 +155,7 @@ pub fn run() {
             commands::hub_debug_fetch,
             commands::set_hub_pin,
             commands::set_hub_category,
+            commands::set_hub_author,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

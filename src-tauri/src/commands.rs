@@ -810,7 +810,9 @@ fn sync_one_creator(
                hub_resource_id    = ?2,
                hub_url             = ?3,
                hub_title           = ?4,
-               hub_author          = ?5,
+               hub_author          = CASE WHEN hub_author_manual = 1
+                                          THEN hub_author
+                                          ELSE ?5 END,
                hub_category        = CASE WHEN hub_category_manual = 1
                                           THEN hub_category
                                           ELSE ?6 END,
@@ -1231,7 +1233,9 @@ fn retry_one_keyword(
                hub_resource_id    = ?2,
                hub_url             = ?3,
                hub_title           = ?4,
-               hub_author          = ?5,
+               hub_author          = CASE WHEN hub_author_manual = 1
+                                          THEN hub_author
+                                          ELSE ?5 END,
                hub_category        = CASE WHEN hub_category_manual = 1
                                           THEN hub_category
                                           ELSE ?6 END,
@@ -3298,6 +3302,131 @@ pub async fn set_hub_category(
                 }
                 Err(e) => {
                     eprintln!("set_hub_category: id {package_id} failed: {e}");
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| format!("tx commit: {e}"))?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct AuthorReport {
+    /// Rows the caller explicitly selected that got their hub_author set.
+    pub directly_updated: i64,
+    /// Other rows by the same creator (any package_name) that picked up
+    /// the override via author-wide propagation. Excludes the directly-
+    /// selected rows. Like `set_hub_category`, this propagation is
+    /// unconditional — the user has declared the canonical author display
+    /// for this creator. hub_author_manual=1 is set on every touched row.
+    pub authors_updated: i64,
+}
+
+/// Bulk-override `hub_author` for one or more local packages and every
+/// other package by the same creator. Sets `hub_author_manual = 1` so
+/// the next hub-sync pass leaves the override alone.
+///
+/// Use case: the hub shows a creator's display name as something
+/// inconvenient ("TAuthor_HubUsername", typo'd, renamed account) and the
+/// user wants the database to reflect their preferred canonical author.
+///
+/// Does NOT touch hub_match_method — this is a display-name correction,
+/// not a re-pin. Propagation scope is *every* package by the same
+/// creator(s) of the selected rows, regardless of confirmed-match state.
+/// The user has unambiguously declared their canonical author identity;
+/// auto-sync can't reconcile that without help, so we set the lock flag
+/// across all relevant rows.
+#[tauri::command]
+pub async fn set_hub_author(
+    state: State<'_, AppState>,
+    package_ids: Vec<i64>,
+    hub_author: String,
+) -> Result<AuthorReport, String> {
+    if package_ids.is_empty() {
+        return Err("no package ids supplied".to_string());
+    }
+    let hub_author = hub_author.trim().to_string();
+    if hub_author.is_empty() {
+        return Err("hub_author cannot be empty".to_string());
+    }
+    let db = state.db.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<AuthorReport, String> {
+        let mut conn = db.lock();
+        let tx = conn.transaction().map_err(|e| format!("tx open: {e}"))?;
+        let mut report = AuthorReport::default();
+
+        // Collect distinct creators across the selected rows so the
+        // author-wide propagation runs once per creator, not once per
+        // selected row. (Common case: user multi-selects within ONE
+        // creator's packages, but we don't rely on that.)
+        let mut creators_touched: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
+        for &package_id in &package_ids {
+            // Read the row's creator. If the row doesn't exist, skip.
+            let creator: Option<String> = tx
+                .query_row(
+                    "SELECT creator FROM packages WHERE id = ?1",
+                    params![package_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            let Some(creator) = creator else {
+                eprintln!("set_hub_author: id {package_id} not found");
+                continue;
+            };
+            let r = tx.execute(
+                "UPDATE packages
+                 SET hub_author = ?1, hub_author_manual = 1
+                 WHERE id = ?2",
+                params![&hub_author, package_id],
+            );
+            match r {
+                Ok(1) => {
+                    report.directly_updated += 1;
+                    creators_touched.insert(creator);
+                }
+                Ok(_) | Err(_) => {
+                    eprintln!(
+                        "set_hub_author: id {package_id} failed: {:?}",
+                        r.err()
+                    );
+                }
+            }
+        }
+
+        // Author-wide propagation, once per distinct creator. Unconditional
+        // — the user has declared the canonical display name for THIS
+        // creator, so every existing row by that creator gets the lock.
+        // Exclude the directly-selected ids from the count so the report
+        // reflects only the propagated rows.
+        for creator in &creators_touched {
+            // We need a placeholder list for `id NOT IN (...)`. SQLite
+            // doesn't support bound-array params, so we splice the ids
+            // (already i64) directly. Safe: i64 → text by Display is
+            // numeric-only.
+            let ids_csv = package_ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE packages
+                 SET hub_author = ?1, hub_author_manual = 1
+                 WHERE creator = ?2
+                   AND id NOT IN ({ids_csv})"
+            );
+            let prop = tx.execute(&sql, params![&hub_author, creator]);
+            match prop {
+                Ok(n) => report.authors_updated += n as i64,
+                Err(e) => {
+                    eprintln!(
+                        "set_hub_author: author-wide propagate failed for creator {creator}: {e}"
+                    );
                 }
             }
         }

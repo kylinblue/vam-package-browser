@@ -75,7 +75,26 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v15_to_v16(&conn)?;
         conn.pragma_update(None, "user_version", 16)?;
     }
+    if current < 17 {
+        migrate_v16_to_v17(&conn)?;
+        conn.pragma_update(None, "user_version", 17)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
+    // Companion to v16's hub_category_manual: a creator's hub display name
+    // ("hub_author") sometimes diverges from how the user thinks of them
+    // — typos in the hub username, name changes, etc. `hub_author_manual
+    // = 1` means "the user has corrected this; don't overwrite it on
+    // sync". Same INTEGER (0/1) shape as v16 for cheap WHERE filters and
+    // CASE-expression preservation.
+    conn.execute_batch(
+        r#"
+        ALTER TABLE packages ADD COLUMN hub_author_manual INTEGER DEFAULT 0;
+        "#,
+    )?;
+    Ok(())
 }
 
 fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {

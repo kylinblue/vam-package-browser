@@ -6,6 +6,7 @@ import {
   HUGE_IMAGE_BYTES,
   openExternalUrl,
   revealInFolder,
+  setHubAuthor,
   setHubCategory,
   setHubPin,
   subThumbUrl,
@@ -410,13 +411,15 @@ function HubInfoSection({
   // resets everything cleanly (the section unmounts with the modal).
   const [showPin, setShowPin] = useState(false);
   const [pinUrl, setPinUrl] = useState("");
-  const [busy, setBusy] = useState<"pin" | "category" | null>(null);
+  const [busy, setBusy] = useState<"pin" | "category" | "author" | null>(null);
   const [feedback, setFeedback] = useState<{
     kind: "ok" | "error";
     text: string;
   } | null>(null);
   const [showCategory, setShowCategory] = useState(false);
   const [categoryDraft, setCategoryDraft] = useState(pkg.hub_category ?? "Scenes");
+  const [showAuthor, setShowAuthor] = useState(false);
+  const [authorDraft, setAuthorDraft] = useState(pkg.hub_author ?? "");
 
   async function handlePin() {
     if (!pinUrl.trim() || busy) return;
@@ -473,6 +476,29 @@ function HubInfoSection({
       onReload();
     } catch (e) {
       setFeedback({ kind: "error", text: `Category error: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleAuthor() {
+    if (!authorDraft.trim() || busy) return;
+    setBusy("author");
+    setFeedback(null);
+    try {
+      const report = await setHubAuthor([pkg.id], authorDraft);
+      const others = report.authors_updated;
+      const msg =
+        others > 0
+          ? `Updated author. ${others} other package${
+              others === 1 ? "" : "s"
+            } by ${pkg.creator || "this creator"} picked up the same override. Auto-sync will keep it.`
+          : "Updated author. Auto-sync will keep this override.";
+      setFeedback({ kind: "ok", text: msg });
+      setShowAuthor(false);
+      onReload();
+    } catch (e) {
+      setFeedback({ kind: "error", text: `Author error: ${e}` });
     } finally {
       setBusy(null);
     }
@@ -537,6 +563,7 @@ function HubInfoSection({
           onClick={() => {
             setShowPin((v) => !v);
             setShowCategory(false);
+            setShowAuthor(false);
             setFeedback(null);
           }}
         >
@@ -549,6 +576,7 @@ function HubInfoSection({
             onClick={() => {
               setShowCategory((v) => !v);
               setShowPin(false);
+              setShowAuthor(false);
               setFeedback(null);
             }}
             title="Override the hub_category for this package — protected from auto-sync overwrites"
@@ -556,6 +584,19 @@ function HubInfoSection({
             Override category…
           </button>
         )}
+        <button
+          type="button"
+          className="detail-action"
+          onClick={() => {
+            setShowAuthor((v) => !v);
+            setShowPin(false);
+            setShowCategory(false);
+            setFeedback(null);
+          }}
+          title={`Set the canonical hub author for ${pkg.creator || "this creator"}. Propagates to every other package by the same creator and is protected from auto-sync overwrites.`}
+        >
+          Override author…
+        </button>
       </div>
 
       {showPin && (
@@ -620,6 +661,39 @@ function HubInfoSection({
             className="detail-action"
             onClick={() => setShowCategory(false)}
             disabled={busy === "category"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {showAuthor && (
+        <div className="detail-hub-pin-row">
+          <input
+            type="text"
+            value={authorDraft}
+            onChange={(e) => setAuthorDraft(e.target.value)}
+            placeholder={`Canonical hub author for ${pkg.creator || "this creator"}`}
+            disabled={busy === "author"}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleAuthor();
+              if (e.key === "Escape") setShowAuthor(false);
+            }}
+            autoFocus
+          />
+          <button
+            type="button"
+            className="detail-action detail-action-primary"
+            onClick={handleAuthor}
+            disabled={!authorDraft.trim() || busy === "author"}
+          >
+            {busy === "author" ? "Applying…" : "Apply"}
+          </button>
+          <button
+            type="button"
+            className="detail-action"
+            onClick={() => setShowAuthor(false)}
+            disabled={busy === "author"}
           >
             Cancel
           </button>

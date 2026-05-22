@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  setHubAuthor,
   setHubCategory,
   setHubPin,
-  type PinReport,
+  type AuthorReport,
   type CategoryReport,
+  type PinReport,
 } from "../lib/api";
 
 /** Mirrors HubCategoryChips' canonical list. Duplicated here rather than
@@ -54,15 +56,19 @@ export function SelectionActionBar({
   onActionApplied,
   onSetVisibility,
 }: Props) {
-  const [mode, setMode] = useState<"closed" | "pin" | "category">("closed");
+  const [mode, setMode] = useState<"closed" | "pin" | "category" | "author">(
+    "closed",
+  );
   const [pinUrl, setPinUrl] = useState("");
   const [category, setCategory] = useState("Scenes");
-  const [busy, setBusy] = useState<"pin" | "category" | null>(null);
+  const [authorDraft, setAuthorDraft] = useState("");
+  const [busy, setBusy] = useState<"pin" | "category" | "author" | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
   function reset() {
     setMode("closed");
     setPinUrl("");
+    setAuthorDraft("");
     setBusy(null);
   }
 
@@ -132,7 +138,50 @@ export function SelectionActionBar({
     }
   }
 
+  async function handleAuthor() {
+    if (!authorDraft.trim() || busy) return;
+    setBusy("author");
+    setFeedback(null);
+    try {
+      const report: AuthorReport = await setHubAuthor(selection, authorDraft);
+      const direct = report.directly_updated;
+      const author = report.authors_updated;
+      const msg =
+        author > 0
+          ? `Updated author for ${direct} package${
+              direct === 1 ? "" : "s"
+            } and ${author} other row${
+              author === 1 ? "" : "s"
+            } by the same creator${author === 1 ? "" : "s"}. Auto-sync will keep this override.`
+          : `Updated author for ${direct} package${
+              direct === 1 ? "" : "s"
+            }. Auto-sync will keep this override.`;
+      setFeedback({ kind: "ok", text: msg });
+      reset();
+      onActionApplied();
+    } catch (e) {
+      setFeedback({ kind: "error", text: `Author error: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const n = selection.length;
+  // Pinning N>1 packages to the same hub URL is semantically wrong — one
+  // resource URL maps to one hub resource, and version-siblings already
+  // get covered automatically by propagation from the pinned row. So we
+  // gate the Pin action to N=1. Users wanting to pin different packages
+  // to different URLs can do so one at a time via DetailView.
+  const canPin = n === 1;
+
+  // Auto-close the Pin form if the selection grows past 1 while it's open
+  // (e.g. the user opened Pin at N=1 then Ctrl-clicked another tile).
+  useEffect(() => {
+    if (mode === "pin" && !canPin) {
+      setMode("closed");
+      setPinUrl("");
+    }
+  }, [mode, canPin]);
 
   return (
     <div className="selection-bar">
@@ -147,7 +196,12 @@ export function SelectionActionBar({
             setMode(mode === "pin" ? "closed" : "pin");
             setFeedback(null);
           }}
-          disabled={busy !== null}
+          disabled={busy !== null || !canPin}
+          title={
+            canPin
+              ? "Pin this package to a hub resource URL"
+              : "Pin URL works on one package at a time — one URL maps to one hub resource. Sibling versions auto-inherit via propagation."
+          }
         >
           Pin to hub URL…
         </button>
@@ -161,6 +215,18 @@ export function SelectionActionBar({
           disabled={busy !== null}
         >
           Override category…
+        </button>
+        <button
+          type="button"
+          className={`selection-bar-action ${mode === "author" ? "active" : ""}`}
+          onClick={() => {
+            setMode(mode === "author" ? "closed" : "author");
+            setFeedback(null);
+          }}
+          disabled={busy !== null}
+          title="Override the hub_author for selected packages. Propagates to every other package by the same creator(s) and protects against auto-sync overwrites."
+        >
+          Override author…
         </button>
         <button
           type="button"
@@ -249,6 +315,39 @@ export function SelectionActionBar({
             className="selection-bar-action"
             onClick={reset}
             disabled={busy === "category"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {mode === "author" && (
+        <div className="selection-bar-form">
+          <input
+            type="text"
+            value={authorDraft}
+            onChange={(e) => setAuthorDraft(e.target.value)}
+            placeholder={`Canonical hub author — also propagates to every other package by the affected creator${n > 1 ? "s" : ""}`}
+            disabled={busy === "author"}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleAuthor();
+              if (e.key === "Escape") reset();
+            }}
+            autoFocus
+          />
+          <button
+            type="button"
+            className="selection-bar-action selection-bar-primary"
+            onClick={handleAuthor}
+            disabled={!authorDraft.trim() || busy === "author"}
+          >
+            {busy === "author" ? "Applying…" : `Apply to ${n}`}
+          </button>
+          <button
+            type="button"
+            className="selection-bar-action"
+            onClick={reset}
+            disabled={busy === "author"}
           >
             Cancel
           </button>
