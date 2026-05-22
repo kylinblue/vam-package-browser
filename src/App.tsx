@@ -24,6 +24,7 @@ import {
   setAddonRoot,
   setFavorite,
   setHidden,
+  verifyActiveFolder,
   type CreatorCount,
   type HubCategoryCount,
   type PackageRow,
@@ -169,6 +170,12 @@ export default function App() {
     number[] | null
   >(null);
   const [visibilityModalOpen, setVisibilityModalOpen] = useState(false);
+  // How many packages are currently materialized in the active folder.
+  // Drives the toolbar indicator post-setup. Refreshed on mount, after
+  // setup commit, and after every LoadVisibilityModal close.
+  const [activeFolderCount, setActiveFolderCount] = useState<number | null>(
+    null,
+  );
 
   // Batch thumb-progress events so we don't re-render per-image.
   const pendingVersionsRef = useRef<Record<number, number>>({});
@@ -441,6 +448,14 @@ export default function App() {
       if (s.addon_root) setAddonRootState(s.addon_root);
       setSetupComplete(s.setup_complete);
       setManagedRoot(s.managed_root);
+      // Active-folder count only meaningful post-setup. Pre-setup the
+      // active_folder_state table is empty but accurate; just reflect.
+      try {
+        const v = await verifyActiveFolder();
+        setActiveFolderCount(v.total);
+      } catch {
+        setActiveFolderCount(null);
+      }
     } catch {
       /* pre-scan: settings may not be set */
     }
@@ -632,6 +647,23 @@ export default function App() {
           >
             {setupComplete ? "Library managed ✓" : "Set up library…"}
           </button>
+          {setupComplete && activeFolderCount !== null && (
+            <button
+              onClick={() => {
+                // Open the modal in unload-all / preset-browse mode by
+                // passing `null` selection. From there the user can
+                // pick a saved preset, see the current loaded count,
+                // or click Unload-all.
+                setVisibilityModalIds(null);
+                setVisibilityModalOpen(true);
+              }}
+              disabled={scanning}
+              title="Active folder contents — load a preset, unload all, or just see what's loaded"
+              style={{ fontVariantNumeric: "tabular-nums" }}
+            >
+              📦 {activeFolderCount.toLocaleString()} loaded
+            </button>
+          )}
           <div className="seg-control" role="radiogroup" aria-label="Classification source" style={{ marginLeft: "auto" }}>
             <button
               type="button"

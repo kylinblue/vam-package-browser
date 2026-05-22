@@ -4,6 +4,7 @@ import {
   createPreset,
   deletePreset,
   getPreset,
+  listCreatorsForPackages,
   listPresets,
   loadVisibility,
   unloadAll,
@@ -57,10 +58,26 @@ export function LoadVisibilityModal({
   const [saveDraftName, setSaveDraftName] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // Per-author toggle. When ON and the modal was opened from a grid
+  // selection (rather than a preset), the SeedSpec sent to the backend
+  // is the distinct creators across the selection — so future loads
+  // auto-include new packages by those same authors. When OFF, the
+  // SeedSpec stays as explicit package_ids (current default).
+  const [authorMode, setAuthorMode] = useState(false);
+  const [selectionAuthors, setSelectionAuthors] = useState<string[]>([]);
+
   // Effective seeds for the plan + commit. Falls back to the empty
   // SeedSpec (= unload-all) when nothing is selected and no preset is
-  // active.
-  const seeds: SeedSpec = activeSeeds ?? { creators: [], package_ids: [] };
+  // active. Per-author toggle (when applicable) swaps the package_ids
+  // for distinct creators so future loads auto-include new packages
+  // from those authors.
+  const seeds: SeedSpec = (() => {
+    if (activeSeeds === null) return { creators: [], package_ids: [] };
+    if (authorMode && selectionAuthors.length > 0) {
+      return { creators: selectionAuthors, package_ids: [] };
+    }
+    return activeSeeds;
+  })();
 
   // Refresh the saved-preset list. Called once on mount and after any
   // create/delete so the list stays current.
@@ -74,7 +91,9 @@ export function LoadVisibilityModal({
     }
   }, [setupComplete]);
 
-  // Load the plan whenever the effective seeds change.
+  // Load the plan whenever the effective seeds change. Re-fires on
+  // active-seeds change, on per-author toggle, or when the looked-up
+  // selection-authors list arrives async.
   useEffect(() => {
     if (!setupComplete) return;
     setPhase({ kind: "loading" });
@@ -90,6 +109,8 @@ export function LoadVisibilityModal({
   }, [
     activeSeeds?.creators.join("|"),
     activeSeeds?.package_ids.join(","),
+    authorMode,
+    selectionAuthors.join("|"),
     setupComplete,
   ]);
 
@@ -97,16 +118,42 @@ export function LoadVisibilityModal({
     refreshPresets();
   }, [refreshPresets]);
 
+  // Look up the distinct creators across the initial selection so the
+  // per-author toggle can show "Seed by author (N authors)". Run once
+  // per modal open — selection prop is stable for the modal's lifetime.
+  useEffect(() => {
+    if (!selection || selection.length === 0) {
+      setSelectionAuthors([]);
+      return;
+    }
+    (async () => {
+      try {
+        const authors = await listCreatorsForPackages(selection);
+        setSelectionAuthors(authors);
+      } catch (e) {
+        console.error("listCreatorsForPackages:", e);
+        setSelectionAuthors([]);
+      }
+    })();
+  }, [selection]);
+
+  // When the user switches to a saved preset, the per-author toggle no
+  // longer applies (preset already encodes its own seed shape). Reset.
+  useEffect(() => {
+    if (activeSeeds && activeSeeds.creators.length > 0) {
+      setAuthorMode(false);
+    }
+  }, [activeSeeds]);
+
   const commit = useCallback(async () => {
     setPhase({ kind: "committing" });
     try {
-      // If the user hasn't picked anything and the caller said "no
-      // selection" too, treat it as unload-all. Otherwise load the
-      // active seeds (which may be from a clicked preset).
+      // Use the effective seeds (post-authorMode-swap) — same SeedSpec
+      // the plan was computed against, so commit matches preview.
       const result: LoadResult =
         activeSeeds === null
           ? await unloadAll()
-          : await loadVisibility(activeSeeds);
+          : await loadVisibility(seeds);
       const msg = formatResult(result);
       onActionResult({ kind: "ok", text: msg });
       onClose();
@@ -115,7 +162,7 @@ export function LoadVisibilityModal({
       setPhase({ kind: "error", message: `${e}` });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSeeds, onActionResult, onClose]);
+  }, [seeds, activeSeeds, onActionResult, onClose]);
 
   const loadPresetSeeds = useCallback(
     async (id: number) => {
@@ -222,6 +269,20 @@ export function LoadVisibilityModal({
 
         {phase.kind === "ready" && (
           <>
+            {/* Per-author toggle: only relevant when seeds came from a
+                grid selection (i.e. selection prop is non-null AND
+                activeSeeds is still package-id-based). Hidden for
+                preset-loaded seeds and for unload-all. */}
+            {selection !== null &&
+              selection.length > 0 &&
+              selectionAuthors.length > 0 &&
+              activeSeeds?.creators.length === 0 && (
+                <AuthorToggle
+                  on={authorMode}
+                  authors={selectionAuthors}
+                  onToggle={setAuthorMode}
+                />
+              )}
             <ReadyView
               plan={phase.plan}
               isUnloadAll={isUnloadAll}
@@ -354,6 +415,13 @@ function ReadyView({ plan, isUnloadAll, onCancel, onCommit }: ReadyProps) {
           in VaM, and Windows will refuse to unlink a file that's held.
         </p>
       )}
+      {!remainsRemove && will_add > 0 && currently_loaded > 0 && (
+        <p style={hintNoteStyle}>
+          ✓ Add-only change — VaM doesn't need a restart. After committing,
+          open VaM's <strong>File → Rescan Add-on Packages</strong> menu to
+          pick up the new packages without closing the app.
+        </p>
+      )}
 
       <div style={buttonRowStyle}>
         <button style={secondaryButtonStyle} onClick={onCancel}>
@@ -377,6 +445,32 @@ function ReadyView({ plan, isUnloadAll, onCancel, onCommit }: ReadyProps) {
         </button>
       </div>
     </>
+  );
+}
+
+interface AuthorToggleProps {
+  on: boolean;
+  authors: string[];
+  onToggle: (next: boolean) => void;
+}
+
+function AuthorToggle({ on, authors, onToggle }: AuthorToggleProps) {
+  const preview = authors.slice(0, 3).join(", ");
+  const more = authors.length > 3 ? ` + ${authors.length - 3} more` : "";
+  return (
+    <label style={authorToggleStyle}>
+      <input
+        type="checkbox"
+        checked={on}
+        onChange={(e) => onToggle(e.target.checked)}
+      />
+      <span>
+        <strong>Seed by author</strong> ({authors.length} author
+        {authors.length === 1 ? "" : "s"}: {preview}
+        {more}) — future new packages by these creators auto-join on
+        next load. Off = use the exact package list you selected.
+      </span>
+    </label>
   );
 }
 
@@ -601,6 +695,30 @@ const warnNoteStyle: React.CSSProperties = {
   margin: "8px 0",
   fontSize: 12,
   lineHeight: 1.4,
+};
+
+const hintNoteStyle: React.CSSProperties = {
+  background: "rgba(63, 185, 80, 0.08)",
+  border: "1px solid rgba(63, 185, 80, 0.3)",
+  borderRadius: 4,
+  padding: "8px 12px",
+  margin: "8px 0",
+  fontSize: 12,
+  lineHeight: 1.4,
+};
+
+const authorToggleStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  padding: "8px 10px",
+  marginBottom: 12,
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+  fontSize: 12,
+  lineHeight: 1.4,
+  cursor: "pointer",
 };
 
 const buttonRowStyle: React.CSSProperties = {

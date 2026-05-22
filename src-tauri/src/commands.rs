@@ -581,6 +581,53 @@ pub fn rename_preset(
         .map_err(map_err)
 }
 
+/// Distinct creators across the supplied package ids, ordered
+/// case-insensitively. Used by the LoadVisibilityModal's per-author
+/// toggle: shows the user which authors they'd be seeding with if they
+/// converted the current selection from package-ids to creator seeds.
+/// Cheap (one indexed query); safe to call on every selection change.
+#[tauri::command]
+pub fn list_creators_for_packages(
+    state: State<'_, AppState>,
+    package_ids: Vec<i64>,
+) -> Result<Vec<String>, String> {
+    if package_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = state.db.lock();
+    // Bind ids via temp table — same trick visibility uses for seed
+    // tables. Cheaper than building a dynamic IN-list for large
+    // selections and dodges SQLite's bound-param cap.
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS creator_lookup_ids (id INTEGER PRIMARY KEY);
+         DELETE FROM creator_lookup_ids;",
+    )
+    .map_err(map_err)?;
+    {
+        let mut ins = conn
+            .prepare("INSERT INTO creator_lookup_ids(id) VALUES (?1)")
+            .map_err(map_err)?;
+        for &id in &package_ids {
+            ins.execute(params![id]).map_err(map_err)?;
+        }
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT p.creator
+               FROM packages p
+               JOIN creator_lookup_ids l ON l.id = p.id
+              WHERE p.creator <> ''
+              ORDER BY p.creator COLLATE NOCASE",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
 #[tauri::command]
 pub fn set_favorite(
     state: State<'_, AppState>,

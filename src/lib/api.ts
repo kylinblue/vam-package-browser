@@ -528,6 +528,16 @@ export async function renamePreset(
   return invoke("rename_preset", { id, name, description });
 }
 
+/** Distinct creators across the supplied package ids. Powers the
+ *  LoadVisibilityModal "Seed by author" toggle: turning a per-package
+ *  selection into a creator-based SeedSpec auto-includes future
+ *  packages by the same authors on subsequent loads. */
+export async function listCreatorsForPackages(
+  packageIds: number[],
+): Promise<string[]> {
+  return invoke<string[]>("list_creators_for_packages", { packageIds });
+}
+
 export interface ThumbProgress {
   id: number;
   ok: boolean;
