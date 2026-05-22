@@ -54,13 +54,54 @@ pub fn generate(
 }
 
 /// Same as `generate` but writes to an explicit output path. Used by the
-/// per-image (sub) thumbnail generator.
+/// per-image (sub) thumbnail generator. Handles both .var ZIP files and
+/// .var directories (unpacked-archive form) transparently.
 pub fn generate_to(
     var_path: &Path,
     preview_entry: &str,
     out_path: &Path,
 ) -> Result<()> {
-    // 1. Read source image bytes from zip (read-only).
+    let bytes = read_entry_bytes(var_path, preview_entry, MAX_SRC_BYTES)?;
+    generate_from_bytes(&bytes, out_path)
+}
+
+/// Pull `entry_name` out of a package, regardless of whether it's stored
+/// as a ZIP archive (.var file) or as a directory tree (.var dir).
+/// Honors a size cap to avoid pathological allocations.
+pub fn read_entry_bytes(
+    var_path: &Path,
+    entry_name: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    if var_path.is_dir() {
+        // Directory package: entry path is just a relative filesystem path.
+        // Defend against `..` traversal — join must stay under var_path.
+        let source = var_path.join(entry_name);
+        let canonical_root = var_path
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", var_path.display()))?;
+        let canonical_source = source
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", source.display()))?;
+        if !canonical_source.starts_with(&canonical_root) {
+            return Err(anyhow!(
+                "entry path escapes var directory: {}",
+                entry_name
+            ));
+        }
+        let md = std::fs::metadata(&canonical_source)?;
+        if md.len() > max_bytes {
+            return Err(anyhow!(
+                "entry too large ({} bytes) in {}",
+                md.len(),
+                var_path.display()
+            ));
+        }
+        let bytes = std::fs::read(&canonical_source)
+            .with_context(|| format!("read {}", canonical_source.display()))?;
+        return Ok(bytes);
+    }
+    // File package (ZIP).
     let file = OpenOptions::new()
         .read(true)
         .write(false)
@@ -68,24 +109,19 @@ pub fn generate_to(
         .with_context(|| format!("open .var read-only: {}", var_path.display()))?;
     let mut zip = ZipArchive::new(file)
         .with_context(|| format!("read zip central dir: {}", var_path.display()))?;
-
-    // HashMap-based lookup; avoids O(N) iteration through the central directory.
     let mut entry = zip
-        .by_name(preview_entry)
-        .with_context(|| format!("preview entry not in zip: {preview_entry}"))?;
-    if entry.size() > MAX_SRC_BYTES {
+        .by_name(entry_name)
+        .with_context(|| format!("entry not in zip: {entry_name}"))?;
+    if entry.size() > max_bytes {
         return Err(anyhow!(
-            "preview image too large ({} bytes) in {}",
+            "entry too large ({} bytes) in {}",
             entry.size(),
             var_path.display()
         ));
     }
     let mut bytes = Vec::with_capacity(entry.size() as usize);
     entry.read_to_end(&mut bytes)?;
-    drop(entry);
-    drop(zip);
-
-    generate_from_bytes(&bytes, out_path)
+    Ok(bytes)
 }
 
 /// Decode raw image bytes (JPG/PNG/WebP) → resize to fit MAX_DIM →

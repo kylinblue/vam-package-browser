@@ -1,12 +1,18 @@
 mod commands;
 pub mod deps;
 pub mod embedding;
+pub mod fsutil;
+pub mod holdout;
 mod hub;
 pub mod index;
+pub mod materialize;
 pub mod meta;
+pub mod propagation;
 mod scanner;
+pub mod setup;
 pub mod tagging;
 pub mod thumbnails;
+pub mod visibility;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -123,6 +129,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::scan_library,
+            commands::get_setup_state,
+            commands::probe_managed_path,
+            commands::begin_migration,
+            commands::revert_setup,
             commands::query_packages,
             commands::count_packages,
             commands::list_creators,
@@ -153,6 +163,21 @@ pub fn run() {
             commands::hub_debug_dump,
             commands::hub_debug_search,
             commands::hub_debug_fetch,
+            commands::set_hub_pin,
+            commands::set_hub_category,
+            commands::set_hub_author,
+            commands::set_package_type,
+            commands::clear_override,
+            commands::load_visibility,
+            commands::unload_all,
+            commands::verify_active_folder,
+            commands::compute_load_plan,
+            commands::list_presets,
+            commands::get_preset,
+            commands::create_preset,
+            commands::delete_preset,
+            commands::rename_preset,
+            commands::list_creators_for_packages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -261,26 +286,14 @@ fn read_zip_entry(
     entry_path: &str,
     max_bytes: u64,
 ) -> anyhow::Result<Vec<u8>> {
-    use std::io::Read;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(var_path)
-        .map_err(|e| anyhow::anyhow!("open {var_path}: {e}"))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| anyhow::anyhow!("read zip {var_path}: {e}"))?;
-    let mut entry = zip
-        .by_name(entry_path)
-        .map_err(|e| anyhow::anyhow!("zip entry {entry_path}: {e}"))?;
-    if entry.size() > max_bytes {
-        anyhow::bail!(
-            "source image too large ({} bytes, cap {}) — skipped",
-            entry.size(),
-            max_bytes
-        );
-    }
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    // Branch on .var-as-file vs .var-as-directory (VaM accepts both).
+    // Shared helper in thumbnails handles the same dispatch for thumb
+    // generation; route through it here so the two stay in sync.
+    thumbnails::read_entry_bytes(
+        std::path::Path::new(var_path),
+        entry_path,
+        max_bytes,
+    )
 }
 
 fn bad_request() -> Response<Cow<'static, [u8]>> {

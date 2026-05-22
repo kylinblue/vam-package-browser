@@ -12,6 +12,7 @@ use zip::ZipArchive;
 
 use crate::deps;
 use crate::meta::{self, PackageMeta, PackageType, PreviewableCounts};
+use crate::tagging::family;
 
 #[derive(Debug, Serialize)]
 pub struct ScanResult {
@@ -33,6 +34,9 @@ struct ScannedPackage {
     package_type: PackageType,
     preview_path: Option<String>,
     counts: PreviewableCounts,
+    /// True when the .var is a directory rather than a ZIP archive.
+    /// Drives the materialization branch (junction vs hardlink).
+    is_directory_package: bool,
     error: Option<String>,
 }
 
@@ -51,20 +55,37 @@ pub fn scan(
     }
     let start = Instant::now();
 
-    // 1. Enumerate .var files (cheap, sequential).
-    let mut var_files: Vec<PathBuf> = WalkDir::new(addon_root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.eq_ignore_ascii_case("var"))
-                    .unwrap_or(false)
-        })
-        .map(|e| e.into_path())
-        .collect();
+    // 1. Enumerate .var entries (both files and directories). VaM accepts
+    // either form, so we do too. For directory packages we yield the dir
+    // itself and call `skip_current_dir` to avoid walking into it (otherwise
+    // every internal file would be a noisy candidate). Order is stable
+    // because we sort the resulting paths.
+    let mut var_files: Vec<PathBuf> = Vec::new();
+    let mut it = WalkDir::new(addon_root).into_iter();
+    while let Some(entry) = it.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let ext_is_var = entry
+            .path()
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("var"))
+            .unwrap_or(false);
+        if !ext_is_var {
+            continue;
+        }
+        let ft = entry.file_type();
+        if ft.is_file() {
+            var_files.push(entry.into_path());
+        } else if ft.is_dir() {
+            var_files.push(entry.into_path());
+            // Don't descend INTO a .var directory — its contents are the
+            // package's payload, not more package candidates.
+            it.skip_current_dir();
+        }
+    }
 
     var_files.sort();
     if let Some(n) = limit {
@@ -89,34 +110,41 @@ pub fn scan(
                  preview_path,
                  scene_count, look_count, plugin_count, clothing_count,
                  hair_count, pose_count, subscene_count, package_mtime,
-                 instructions)
+                 instructions, is_directory_package)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
              ON CONFLICT(var_path) DO UPDATE SET
-                file_size       = excluded.file_size,
-                file_mtime      = excluded.file_mtime,
-                creator         = excluded.creator,
-                package_name    = excluded.package_name,
-                version         = excluded.version,
-                license         = excluded.license,
-                program_version = excluded.program_version,
-                description     = excluded.description,
-                package_type    = excluded.package_type,
-                content_count   = excluded.content_count,
-                dep_count       = excluded.dep_count,
-                has_preview     = excluded.has_preview,
-                scanned_at      = excluded.scanned_at,
-                error           = excluded.error,
-                preview_path    = excluded.preview_path,
-                scene_count     = excluded.scene_count,
-                look_count      = excluded.look_count,
-                plugin_count    = excluded.plugin_count,
-                clothing_count  = excluded.clothing_count,
-                hair_count      = excluded.hair_count,
-                pose_count      = excluded.pose_count,
-                subscene_count  = excluded.subscene_count,
-                package_mtime   = excluded.package_mtime,
-                instructions    = excluded.instructions",
+                file_size            = excluded.file_size,
+                file_mtime           = excluded.file_mtime,
+                creator              = excluded.creator,
+                package_name         = excluded.package_name,
+                version              = excluded.version,
+                license              = excluded.license,
+                program_version      = excluded.program_version,
+                description          = excluded.description,
+                -- Preserve a user-set package_type override across rescans.
+                -- The scanner always proposes its heuristic classification
+                -- (`excluded.package_type`), but if the user has flagged a
+                -- manual override, we keep what's already in the row.
+                package_type         = CASE WHEN package_type_manual = 1
+                                            THEN package_type
+                                            ELSE excluded.package_type END,
+                content_count        = excluded.content_count,
+                dep_count            = excluded.dep_count,
+                has_preview          = excluded.has_preview,
+                scanned_at           = excluded.scanned_at,
+                error                = excluded.error,
+                preview_path         = excluded.preview_path,
+                scene_count          = excluded.scene_count,
+                look_count           = excluded.look_count,
+                plugin_count         = excluded.plugin_count,
+                clothing_count       = excluded.clothing_count,
+                hair_count           = excluded.hair_count,
+                pose_count           = excluded.pose_count,
+                subscene_count       = excluded.subscene_count,
+                package_mtime        = excluded.package_mtime,
+                instructions         = excluded.instructions,
+                is_directory_package = excluded.is_directory_package",
         )?;
         let mut sel_id = tx.prepare_cached("SELECT id FROM packages WHERE var_path = ?1")?;
         let mut sel_prev = tx.prepare_cached(
@@ -202,6 +230,7 @@ pub fn scan(
                 p.counts.subscene as i64,
                 p.package_mtime,
                 instr,
+                p.is_directory_package as i64,
             ])?;
 
             let pkg_id: i64 = sel_id.query_row(params![var_path_str], |row| row.get(0))?;
@@ -219,6 +248,17 @@ pub fn scan(
     deps::resolve_all(&tx)?;
     tx.commit()?;
 
+    // Auto-link any newly-scanned package to its package_family row.
+    // Lives *outside* the scan transaction because family::recompute opens
+    // its own internal transaction (SQLite doesn't allow nested BEGIN), and
+    // because the operation is idempotent: if it fails partway, re-running
+    // the scan (or `tag_library --recompute-families`) makes it whole. This
+    // closes the wiring gap that previously left packages with NULL
+    // family_id between scans and the next manual recompute, making them
+    // invisible to the classifier predictors (kind-vote and embed-knn both
+    // need family_id).
+    family::recompute(conn)?;
+
     Ok(ScanResult {
         scanned: scanned.len(),
         errors,
@@ -227,17 +267,28 @@ pub fn scan(
 }
 
 fn parse_one(path: &Path) -> ScannedPackage {
-    let (file_size, file_mtime) = stat(path).unwrap_or((0, 0));
+    let (stat_size, file_mtime) = stat(path).unwrap_or((0, 0));
+    let is_dir = path.is_dir();
+    // For directories, std::fs::metadata returns ~0 for len. UI / sort
+    // expect a meaningful "size of the package" so we sum recursively.
+    let file_size = if is_dir { dir_recursive_size(path) } else { stat_size };
 
-    match read_meta_and_entries(path) {
-        Ok((meta, zip_entries, package_mtime)) => {
+    let result = if is_dir {
+        read_meta_and_entries_from_dir(path)
+    } else {
+        read_meta_and_entries(path)
+    };
+
+    match result {
+        Ok((meta, entries, package_mtime)) => {
             // Classify on contentList (author's official content list — best
-            // for type intent). Pick preview & count items from zip_entries
-            // (catches files hidden behind directory-style contentList entries,
-            // which is how many clothing/hair packages bundle their previews).
+            // for type intent). Pick preview & count items from the entry
+            // list (catches files hidden behind directory-style contentList
+            // entries, which is how many clothing/hair packages bundle
+            // their previews).
             let ty = meta::classify(&meta.content_list);
-            let preview_path = meta::pick_preview(&zip_entries);
-            let counts = meta::previewable_counts(&zip_entries);
+            let preview_path = meta::pick_preview(&entries);
+            let counts = meta::previewable_counts(&entries);
             ScannedPackage {
                 var_path: path.to_path_buf(),
                 file_size,
@@ -247,6 +298,7 @@ fn parse_one(path: &Path) -> ScannedPackage {
                 package_type: ty,
                 preview_path,
                 counts,
+                is_directory_package: is_dir,
                 error: None,
             }
         }
@@ -259,6 +311,7 @@ fn parse_one(path: &Path) -> ScannedPackage {
             package_type: PackageType::Unknown,
             preview_path: None,
             counts: PreviewableCounts::default(),
+            is_directory_package: is_dir,
             error: Some(format!("{e:#}")),
         },
     }
@@ -317,6 +370,75 @@ fn read_meta_and_entries(path: &Path) -> Result<(PackageMeta, Vec<String>, i64)>
     Ok((meta, entries, max_mtime))
 }
 
+/// Directory-form package: parse `<dir>/meta.json` directly from the filesystem
+/// and walk the dir for content entries. Output shape matches
+/// `read_meta_and_entries` so the calling pipeline is shape-symmetric across
+/// file vs. directory packages.
+///
+/// Entry names use forward-slash separators to match ZIP convention (which the
+/// downstream `classify` / `pick_preview` / `previewable_counts` functions
+/// already canonicalize via `replace('\\', "/")`).
+fn read_meta_and_entries_from_dir(dir: &Path) -> Result<(PackageMeta, Vec<String>, i64)> {
+    // Locate meta.json case-insensitively at the directory root.
+    let meta_path = WalkDir::new(dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| {
+            e.file_type().is_file()
+                && e.file_name()
+                    .to_str()
+                    .map(|s| s.eq_ignore_ascii_case("meta.json"))
+                    .unwrap_or(false)
+        })
+        .map(|e| e.into_path())
+        .ok_or_else(|| anyhow!("meta.json missing in directory package {}", dir.display()))?;
+
+    let raw = std::fs::read(&meta_path)
+        .with_context(|| format!("read {}", meta_path.display()))?;
+    const MAX: usize = 4 * 1024 * 1024;
+    if raw.len() > MAX {
+        return Err(anyhow!(
+            "meta.json suspiciously large: {} bytes",
+            raw.len()
+        ));
+    }
+    let trimmed = strip_utf8_bom(&raw);
+    let meta = meta::parse_meta(trimmed)
+        .with_context(|| format!("parse meta.json from {}", meta_path.display()))?;
+
+    // Walk the directory for every file (any depth) and capture relative
+    // forward-slash paths. Also track the latest file mtime — the directory-
+    // package analogue of "max central-directory entry timestamp" for ZIPs.
+    let mut entries: Vec<String> = Vec::new();
+    let mut max_mtime: i64 = 0;
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !rel_str.is_empty() {
+            entries.push(rel_str);
+        }
+        if let Ok(md) = entry.metadata() {
+            if let Ok(modified) = md.modified() {
+                if let Ok(d) = modified.duration_since(UNIX_EPOCH) {
+                    let t = d.as_secs() as i64;
+                    if t > max_mtime {
+                        max_mtime = t;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((meta, entries, max_mtime))
+}
+
 /// Convert a zip entry's stored DOS time to unix seconds, treating the wall
 /// clock as UTC (zip DOS times carry no tz). Returns None for out-of-range
 /// timestamps (DOS time only spans 1980–2107).
@@ -359,6 +481,21 @@ fn stat(path: &Path) -> Option<(i64, i64)> {
         .map(unix_secs)
         .unwrap_or(0);
     Some((size, mtime))
+}
+
+/// Sum every regular-file byte under `dir` (recursive). Used for the
+/// directory-package case so the UI shows a meaningful size instead of
+/// the bare dir-entry size (which is ~0 on NTFS).
+fn dir_recursive_size(dir: &Path) -> i64 {
+    let mut total: i64 = 0;
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            if let Ok(md) = entry.metadata() {
+                total = total.saturating_add(md.len() as i64);
+            }
+        }
+    }
+    total
 }
 
 fn unix_secs(t: SystemTime) -> i64 {

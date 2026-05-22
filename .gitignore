@@ -21,6 +21,12 @@ node_modules/
 .fastembed_cache/
 
 # ---------------------------------------------------------------------------
+# Local-only sampling/review output — regenerated on demand from the DB by
+# src-tauri/src/bin/sample_predictions.rs. Contents are user-specific.
+# ---------------------------------------------------------------------------
+classifier-review-sample.md
+
+# ---------------------------------------------------------------------------
 # Environment files (allow example template through)
 # ---------------------------------------------------------------------------
 .env

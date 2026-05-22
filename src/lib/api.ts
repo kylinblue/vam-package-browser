@@ -61,8 +61,20 @@ export interface PackageRow {
   hub_license: string | null;
   hub_lastmod: number | null;
   hub_external_url: string | null;
-  /** "filename" | "fuzzy_title" | "slug_match" | "manual" | null. */
+  /** "filename" | "fuzzy_title" | "slug_match" | "manual" | "override" | "inherit" | null. */
   hub_match_method: string | null;
+  /** User-override lock flags (0/1). When 1, the corresponding field
+   *  resists auto-sync overwrites — sync writers honor these via CASE
+   *  expressions; the scanner does the same for package_type_manual. */
+  hub_category_manual: number;
+  hub_author_manual: number;
+  package_type_manual: number;
+  /** Pristine pre-override snapshots. Populated by set_* on first
+   *  override; restored by clear_override. NULL when never overridden
+   *  or after a restore. UI shows "X (was Y)" when both are present. */
+  hub_category_original: string | null;
+  hub_author_original: string | null;
+  package_type_original: string | null;
 }
 
 export type SortField =
@@ -278,12 +290,282 @@ export async function revealInFolder(path: string): Promise<void> {
   return invoke("reveal_in_folder", { path });
 }
 
-export async function getSettings(): Promise<{ addon_root: string | null }> {
+export interface Settings {
+  addon_root: string | null;
+  /** Where the real .var files live post-setup. Null pre-setup. */
+  managed_root: string | null;
+  /** True once the one-time visibility-presets setup migration finished. */
+  setup_complete: boolean;
+  /** Unix seconds when setup completed. */
+  setup_completed_at: number | null;
+}
+
+export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }
 
 export async function setAddonRoot(path: string): Promise<void> {
   return invoke("set_addon_root", { path });
+}
+
+// --- Visibility-presets setup wizard ---------------------------------------
+
+export interface SetupState {
+  setup_complete: boolean;
+  addon_root: string | null;
+  managed_root: string | null;
+  managed_volume_id: number | null;
+  setup_completed_at: number | null;
+  /** True when managed_root is set but setup_complete is false AND at least
+   *  one package row already points under managed_root — a previous run was
+   *  interrupted. UI should offer to resume rather than start fresh. */
+  migration_in_progress: boolean;
+}
+
+export interface ProbeCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface ProbeResult {
+  addon_root: string;
+  managed_root: string;
+  /** True iff every check in `checks` passed and begin_migration would proceed. */
+  ok: boolean;
+  /** Per-check status in validation order; first failure is the most likely
+   *  "fix me first" message. */
+  checks: ProbeCheck[];
+  /** First failed check's detail message, hoisted for easy UI binding. */
+  diagnostic: string | null;
+}
+
+export interface MigrationProgress {
+  moved: number;
+  total: number;
+  /** Basename of the current/most-recent file moved in the just-finished batch. */
+  current: string | null;
+}
+
+export interface MigrationError {
+  path: string;
+  reason: string;
+}
+
+export interface MigrationResult {
+  moved: number;
+  /** .var files in addon_root not in the DB at migration time (Hub downloads
+   *  added between scans). Migrated alongside the indexed ones. */
+  leftover_moved: number;
+  errors: MigrationError[];
+  elapsed_ms: number;
+}
+
+/** Current setup state. Read this on app launch to decide whether to show
+ *  the wizard, a resume banner, or normal UI. */
+export async function getSetupState(): Promise<SetupState> {
+  return invoke<SetupState>("get_setup_state");
+}
+
+/** Run every pre-commit validation against a proposed managed path.
+ *  Cheap (no FS writes outside a tiny throwaway hardlink probe). Re-call on
+ *  every path change for live status updates. */
+export async function probeManagedPath(
+  managedPath: string,
+): Promise<ProbeResult> {
+  return invoke<ProbeResult>("probe_managed_path", { managedPath });
+}
+
+/** Execute the one-time migration. Backend emits `migration.progress` events
+ *  during the run; subscribe via @tauri-apps/api/event before calling. */
+export async function beginMigration(
+  managedPath: string,
+): Promise<MigrationResult> {
+  return invoke<MigrationResult>("begin_migration", { managedPath });
+}
+
+export interface RevertResult {
+  /** .var entries moved back from managed_root to addon_root. */
+  moved: number;
+  /** active_folder_state entries cleared (hardlinks unlinked / junctions removed). */
+  active_cleared: number;
+  /** Stale packages rows pruned because their var_path no longer
+   *  resolves to anything on disk. */
+  orphans_pruned: number;
+  errors: MigrationError[];
+  elapsed_ms: number;
+}
+
+/** Undo a setup migration cleanly. Unloads the active folder, moves
+ *  every entry back from managed_root → addon_root preserving relative
+ *  path, prunes orphan packages rows, and resets setup settings. Same
+ *  `migration.progress` event stream as forward migration. */
+export async function revertSetup(): Promise<RevertResult> {
+  return invoke<RevertResult>("revert_setup");
+}
+
+// --- Visibility-presets load / unload --------------------------------------
+
+/** What the user wants visible — author seeds + explicit package ids.
+ *  Authors resolve dynamically against `packages.creator` (case-
+ *  insensitive); explicit ids bypass the `is_hidden` filter. */
+export interface SeedSpec {
+  creators: string[];
+  package_ids: number[];
+}
+
+export interface LoadError {
+  package_id: number;
+  path: string;
+  reason: string;
+}
+
+export interface LoadResult {
+  /** Packages newly hardlinked into the active folder in this call. */
+  added: number;
+  /** Packages whose hardlink was removed from the active folder. */
+  removed: number;
+  /** Packages already correctly materialized — no FS touch.
+   *  `kept + added == |closure(seeds)|` on success. */
+  kept: number;
+  /** Per-package errors that didn't abort the sync (destination
+   *  occupied, source missing, etc.). */
+  errors: LoadError[];
+  elapsed_ms: number;
+}
+
+export interface VerifyResult {
+  total: number;
+  ok: number;
+  missing_in_active: number[];
+  inode_mismatch: number[];
+  missing_in_managed: number[];
+}
+
+/** Reconcile the active folder to be exactly closure(seeds). Adds
+ *  hardlinks for packages newly in target; removes hardlinks for
+ *  packages newly out. Idempotent — re-calling with the same seeds
+ *  is a no-op. */
+export async function loadVisibility(seeds: SeedSpec): Promise<LoadResult> {
+  return invoke<LoadResult>("load_visibility", { seeds });
+}
+
+/** Empty the active folder. Removes every hardlink we placed; unmanaged
+ *  files in the folder are left alone. */
+export async function unloadAll(): Promise<LoadResult> {
+  return invoke<LoadResult>("unload_all");
+}
+
+/** Read-only health check on `active_folder_state` vs the filesystem.
+ *  Reports stale rows. Caller decides whether to fix via `loadVisibility`
+ *  (which is self-healing on re-call). */
+export async function verifyActiveFolder(): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_active_folder");
+}
+
+export interface UnresolvedDep {
+  src_package_id: number;
+  raw_dep_key: string;
+}
+
+export interface ClosurePreview {
+  /** Packages pulled in by author seeds (intersected with closure). */
+  from_authors: number;
+  /** Packages from explicit package seeds NOT already covered by authors. */
+  from_packages: number;
+  /** Packages added only via transitive dep resolution, not directly seeded. */
+  from_deps: number;
+  /** Total resolved ids in the closure. */
+  total: number;
+  /** All package ids in the closure (sorted). */
+  package_ids: number[];
+  /** Dep keys that referenced a non-installed package, paired with the
+   *  closure-resident package that referenced them. */
+  unresolved: UnresolvedDep[];
+}
+
+export interface LoadPlan {
+  /** Closure breakdown (counts + ids + unresolved). */
+  preview: ClosurePreview;
+  /** Count of rows currently in active_folder_state. */
+  currently_loaded: number;
+  /** Packages that would be newly hardlinked on commit. */
+  will_add: number;
+  /** Packages that would be unlinked (in current but not in target). */
+  will_remove: number;
+  /** Packages already correctly materialized — no FS touch. */
+  will_keep: number;
+}
+
+/** Dry-run for the load-visibility modal: closure + diff against the
+ *  current active folder. Cheap (pure SQL). */
+export async function computeLoadPlan(seeds: SeedSpec): Promise<LoadPlan> {
+  return invoke<LoadPlan>("compute_load_plan", { seeds });
+}
+
+// --- Named-preset CRUD -----------------------------------------------------
+
+export interface PresetSummary {
+  id: number;
+  name: string;
+  description: string | null;
+  /** Number of distinct author seeds attached to this preset. */
+  creator_count: number;
+  /** Number of explicit package-id seeds attached to this preset. */
+  package_count: number;
+  /** Unix seconds. */
+  created_at: number;
+  updated_at: number;
+}
+
+export interface Preset {
+  summary: PresetSummary;
+  /** Full seed spec — ready to feed back into computeLoadPlan or
+   *  loadVisibility for "load this preset" flows. */
+  seeds: SeedSpec;
+}
+
+/** All presets, most-recently-updated first. */
+export async function listPresets(): Promise<PresetSummary[]> {
+  return invoke<PresetSummary[]>("list_presets");
+}
+
+export async function getPreset(id: number): Promise<Preset> {
+  return invoke<Preset>("get_preset", { id });
+}
+
+/** Create a new named preset. Returns the new row id. Fails if `name`
+ *  is empty or duplicates an existing preset (UNIQUE constraint). */
+export async function createPreset(
+  name: string,
+  seeds: SeedSpec,
+  description?: string,
+): Promise<number> {
+  return invoke<number>("create_preset", { name, description, seeds });
+}
+
+export async function deletePreset(id: number): Promise<void> {
+  return invoke("delete_preset", { id });
+}
+
+/** Rename a preset and/or update its description. Either side can be
+ *  omitted to leave it unchanged. Bumps `updated_at`. */
+export async function renamePreset(
+  id: number,
+  name?: string,
+  description?: string,
+): Promise<void> {
+  return invoke("rename_preset", { id, name, description });
+}
+
+/** Distinct creators across the supplied package ids. Powers the
+ *  LoadVisibilityModal "Seed by author" toggle: turning a per-package
+ *  selection into a creator-based SeedSpec auto-includes future
+ *  packages by the same authors on subsequent loads. */
+export async function listCreatorsForPackages(
+  packageIds: number[],
+): Promise<string[]> {
+  return invoke<string[]>("list_creators_for_packages", { packageIds });
 }
 
 export interface ThumbProgress {
@@ -473,4 +755,138 @@ export async function getPackageRelationships(
  *  every scan — surfacing it as a command for the dev/maintenance case. */
 export async function resolveDependencies(): Promise<void> {
   return invoke("resolve_dependencies");
+}
+
+// ─── Hub pin / category override ──────────────────────────────────────────
+
+/** Outcome of a single package's pin attempt. Backend returns one entry
+ *  per requested package id, even when most fail in the same way (e.g.
+ *  URL parse error — every id gets a UrlParseError result so the UI can
+ *  show a uniform per-row table). */
+export type PinStatus =
+  | "ok"
+  | "url_parse_error"
+  | "not_found"
+  | "probe_failed"
+  | "package_missing"
+  | "db_error";
+
+export interface PinResult {
+  package_id: number;
+  /** "manual" or "override" on success, null on any failure. */
+  method: "manual" | "override" | null;
+  status: PinStatus;
+  /** Short human-readable context for non-ok rows (e.g. error message
+   *  from the HEAD probe). Frontend may surface in the toast. */
+  detail: string | null;
+}
+
+export interface PinReport {
+  results: PinResult[];
+  /** Aggregate propagation counts across all per-package writes. */
+  siblings_updated: number;
+  authors_updated: number;
+  /** Convenience flag for the toast — true iff ≥1 row was pinned. */
+  any_succeeded: boolean;
+}
+
+/** Manually pin one or more local packages to a hub resource. Accepts any
+ *  of: full URL, /resources/<slug>.<id>/ path (with or without subpath /
+ *  query), bare `<slug>.<id>`, or bare numeric id.
+ *
+ *  Backend validates with a single HEAD probe (resource-level, not
+ *  per-package) before any DB write. On success each package gets
+ *  hub_resource_id + hub_url + hub_match_method ('manual' if no prior
+ *  match, 'override' otherwise), and `propagate_hub_match` fires from
+ *  that row. Other hub_* metadata is filled in by the next hub-sync. */
+export async function setHubPin(
+  packageIds: number[],
+  hubUrl: string,
+): Promise<PinReport> {
+  return invoke<PinReport>("set_hub_pin", { packageIds, hubUrl });
+}
+
+export interface CategoryReport {
+  /** Rows the caller explicitly selected that got their category set. */
+  directly_updated: number;
+  /** Sibling rows (same creator+package_name) updated via propagation —
+   *  unconditional propagation in this case, since the user explicitly
+   *  declared a category for the package family. */
+  siblings_updated: number;
+}
+
+/** Bulk-override hub_category for selected packages. Sets the
+ *  `hub_category_manual` flag so subsequent hub-syncs leave the override
+ *  alone. Does NOT touch hub_match_method — this isn't a re-pin. */
+export async function setHubCategory(
+  packageIds: number[],
+  category: string,
+): Promise<CategoryReport> {
+  return invoke<CategoryReport>("set_hub_category", { packageIds, category });
+}
+
+export interface AuthorReport {
+  /** Rows the caller explicitly selected. */
+  directly_updated: number;
+  /** Other rows by the same creator(s) reached via author-wide
+   *  propagation. Disjoint from `directly_updated`. */
+  authors_updated: number;
+}
+
+/** Bulk-override `hub_author` for selected packages AND every other
+ *  package by the same creator(s). Sets `hub_author_manual = 1` on every
+ *  touched row so subsequent hub-syncs leave the override alone — useful
+ *  when the hub's displayed author name differs from how the user wants
+ *  the creator identified. */
+export async function setHubAuthor(
+  packageIds: number[],
+  hubAuthor: string,
+): Promise<AuthorReport> {
+  return invoke<AuthorReport>("set_hub_author", { packageIds, hubAuthor });
+}
+
+export interface PackageTypeReport {
+  /** Rows the caller explicitly selected. */
+  directly_updated: number;
+  /** Sibling versions (same creator + package_name) that picked up the
+   *  override via propagation. Disjoint from `directly_updated`. */
+  siblings_updated: number;
+}
+
+/** Bulk-override the local heuristic `package_type` for selected
+ *  packages + their version-siblings. Sets `package_type_manual = 1`
+ *  so the scanner leaves the override alone on rescan. Useful when a
+ *  package's contentList spans categories and the scanner labels it
+ *  "Mixed" but the user knows it's effectively a Scene / Look / Plugin. */
+export async function setPackageType(
+  packageIds: number[],
+  packageType: PackageType,
+): Promise<PackageTypeReport> {
+  return invoke<PackageTypeReport>("set_package_type", {
+    packageIds,
+    packageType,
+  });
+}
+
+export type OverrideField = "category" | "author" | "type" | "pin";
+
+export interface ClearOverrideReport {
+  rows_updated: number;
+}
+
+/** Release a user-override. `field` selects which lock to clear:
+ *   - "category" → hub_category_manual = 0 (across version siblings).
+ *     Leaves hub_category value alone; next sync may overwrite.
+ *   - "author" → hub_author_manual = 0 (across every package by the
+ *     affected creator). Leaves hub_author value alone.
+ *   - "type" → package_type_manual = 0 (across version siblings).
+ *     Leaves package_type alone; next scan may reclassify.
+ *   - "pin" → full unpin on the selected rows only (does NOT cascade
+ *     to siblings — they may have independent pins). Preserves
+ *     hub_author / hub_category if their _manual flags are set. */
+export async function clearOverride(
+  packageIds: number[],
+  field: OverrideField,
+): Promise<ClearOverrideReport> {
+  return invoke<ClearOverrideReport>("clear_override", { packageIds, field });
 }

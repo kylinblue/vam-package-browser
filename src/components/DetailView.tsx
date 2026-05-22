@@ -1,21 +1,46 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  clearOverride,
   getPackageDetail,
   getPackageRelationships,
   HUGE_IMAGE_BYTES,
   openExternalUrl,
   revealInFolder,
+  setHubAuthor,
+  setHubCategory,
+  setHubPin,
+  setPackageType,
   subThumbUrl,
   thumbUrl,
   vamHubAuthorSearchUrl,
   vamHubPackageSearchUrl,
   type ImageEntry,
+  type OverrideField,
   type PackageDetail,
   type PackageRelationships,
   type PackageRow,
+  type PackageType,
   type RelatedPackage,
 } from "../lib/api";
+
+/** Canonical local PackageType list — mirrors the Rust PACKAGE_TYPE_VALUES
+ *  constant in commands.rs. Used by the override dropdown. */
+const PACKAGE_TYPES: readonly PackageType[] = [
+  "Scene",
+  "Look",
+  "Morph",
+  "Texture",
+  "Clothing",
+  "Hair",
+  "Plugin",
+  "Asset",
+  "Pose",
+  "Sound",
+  "SubScene",
+  "Mixed",
+  "Unknown",
+];
 import { TagChips } from "./TagChips";
 
 interface Props {
@@ -28,9 +53,18 @@ interface Props {
   onClose: () => void;
   onFilterByAuthor: (author: string) => void;
   onFilterByType: (type: string) => void;
+  /** Filter the grid by a hub_category value. Used by the inline
+   *  "🔒 Looks" override chip in the subtitle when the user has locked
+   *  a hub category — clicking the chip applies that category as the
+   *  grid filter. */
+  onFilterByHubCategory: (category: string) => void;
   /** Open another package's detail view without dismissing this modal. Used
    *  by the dependency sidebar to navigate between related packages. */
   onOpenPackage: (id: number) => void;
+  /** App-level action result sink. DetailView forwards every successful
+   *  or failed override / pin / category / author write here; App shows
+   *  the toast and (on success) refreshes the grid + aggregates. */
+  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
 }
 
 function formatSize(bytes: number): string {
@@ -63,7 +97,9 @@ export function DetailView({
   onClose,
   onFilterByAuthor,
   onFilterByType,
+  onFilterByHubCategory,
   onOpenPackage: _onOpenPackage,
+  onActionResult,
 }: Props) {
   const [detail, setDetail] = useState<PackageDetail | null>(null);
   const [relationships, setRelationships] =
@@ -71,6 +107,10 @@ export function DetailView({
   const [error, setError] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [hoveredImage, setHoveredImage] = useState<string | null>(null);
+  // Bumped after a hub pin / category override / type override succeeds to
+  // re-fetch the package detail with updated fields. Avoids stale data
+  // after the user performs an inline action.
+  const [reloadCounter, setReloadCounter] = useState(0);
 
   // "Find similar" state shelved alongside the Ask UI — reactivation path
   // documented in App.tsx and TODO-semantic-search-ui.md.
@@ -99,13 +139,23 @@ export function DetailView({
 
   const previewImage = hoveredImage ?? selectedImage;
 
+  // Track the last currentId we fetched so we can distinguish "user
+  // navigated to a different package" (need to blank the panel — old
+  // package's image / metadata is irrelevant) from "same package, just a
+  // post-action refetch" (keep showing the old data; it'll be replaced
+  // atomically when the new fetch returns).
+  const lastFetchedIdRef = useRef<number | null>(null);
+
   useEffect(() => {
     let cancelled = false;
-    setDetail(null);
-    setRelationships(null);
+    if (lastFetchedIdRef.current !== currentId) {
+      setDetail(null);
+      setRelationships(null);
+      setSelectedImage(null);
+      setHoveredImage(null);
+    }
     setError(null);
-    setSelectedImage(null);
-    setHoveredImage(null);
+    lastFetchedIdRef.current = currentId;
     (async () => {
       try {
         // Fire detail + relationships in parallel — relationships is cheap
@@ -129,7 +179,7 @@ export function DetailView({
     return () => {
       cancelled = true;
     };
-  }, [currentId]);
+  }, [currentId, reloadCounter]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -198,13 +248,73 @@ export function DetailView({
                 <span className="detail-version">v{pkg.version}</span>
               </div>
               <div className="detail-subtitle">
-                <button
-                  className="detail-type-link"
-                  onClick={() => onFilterByType(pkg.package_type)}
-                  title="Filter grid by this type"
-                >
-                  {pkg.package_type}
-                </button>
+                {/* Override chips: prepend one per active override so the
+                    locked value is the leftmost (and brightest) element
+                    in the subtitle. When package_type itself is overridden,
+                    the existing type chip below shows the original
+                    pre-override value in a demoted white — the override
+                    chip carries the current value.
+                    Order is type → category → author, matching the
+                    "Overrides" section's button order below the fold. */}
+                {pkg.package_type_manual === 1 && (
+                  <button
+                    type="button"
+                    className="detail-override-chip"
+                    onClick={() => onFilterByType(pkg.package_type)}
+                    title={`Type is locked to "${pkg.package_type}". Click to filter the grid by this type.`}
+                  >
+                    <span className="detail-override-chip-lock" aria-hidden="true">🔒</span>
+                    {pkg.package_type}
+                  </button>
+                )}
+                {pkg.hub_category_manual === 1 && pkg.hub_category && (
+                  <button
+                    type="button"
+                    className="detail-override-chip"
+                    onClick={() => onFilterByHubCategory(pkg.hub_category!)}
+                    title={`Hub category is locked to "${pkg.hub_category}". Click to filter the grid by this category.`}
+                  >
+                    <span className="detail-override-chip-lock" aria-hidden="true">🔒</span>
+                    {pkg.hub_category}
+                  </button>
+                )}
+                {pkg.hub_author_manual === 1 && pkg.hub_author && (
+                  <button
+                    type="button"
+                    className="detail-override-chip"
+                    onClick={() => onFilterByAuthor(pkg.creator)}
+                    title={`Author is locked to "${pkg.hub_author}" (originally "${pkg.hub_author_original ?? "—"}"). Click to filter the grid by ${pkg.creator}.`}
+                  >
+                    <span className="detail-override-chip-lock" aria-hidden="true">🔒</span>
+                    {pkg.hub_author}
+                  </button>
+                )}
+                {/* Existing type chip — when type is overridden it now
+                    shows the ORIGINAL pre-override value (the override
+                    itself is the chip above). When any override of any
+                    field is active, this chip is demoted to plain white
+                    so the locked chip(s) read as the prominent items. */}
+                {(() => {
+                  const hasAnyOverride =
+                    pkg.package_type_manual === 1 ||
+                    pkg.hub_category_manual === 1 ||
+                    pkg.hub_author_manual === 1;
+                  const displayedType =
+                    pkg.package_type_manual === 1 && pkg.package_type_original
+                      ? pkg.package_type_original
+                      : pkg.package_type;
+                  return (
+                    <button
+                      className={`detail-type-link ${
+                        hasAnyOverride ? "detail-type-link-demoted" : ""
+                      }`}
+                      onClick={() => onFilterByType(displayedType)}
+                      title="Filter grid by this type"
+                    >
+                      {displayedType}
+                    </button>
+                  );
+                })()}
                 <span>· {formatSize(pkg.file_size)}</span>
                 <span title="When this .var was last touched on disk">
                   · file {formatDate(pkg.file_mtime)}
@@ -261,9 +371,12 @@ export function DetailView({
                   </section>
                 )}
 
-                {viewMode === "fetched" && pkg.hub_resource_id && (
-                  <HubInfoSection pkg={pkg} />
-                )}
+                <HubInfoSection
+                  pkg={pkg}
+                  viewMode={viewMode}
+                  onReload={() => setReloadCounter((c) => c + 1)}
+                  onActionResult={onActionResult}
+                />
 
                 {viewMode === "tagged" && tags.length > 0 && (
                   <section>
@@ -355,37 +468,298 @@ export function DetailView({
 // to revive; the relevant Tauri command is `search_similar_families` in
 // commands.rs.
 
-function HubInfoSection({ pkg }: { pkg: PackageRow }) {
+/** Canonical hub category list, mirrors HubCategoryChips. Kept inline
+ *  rather than imported because the picker UI only needs the labels —
+ *  if/when the list grows beyond ~25 entries, hoist to lib/. */
+const HUB_CATEGORIES: readonly string[] = [
+  "Scenes",
+  "Looks",
+  "Clothing",
+  "Hairstyles",
+  "Morphs",
+  "Poses",
+  "Mocap + Animation",
+  "Textures",
+  "Environments",
+  "Lighting + HDRI",
+  "Assets + Accessories",
+  "Audio",
+  "Plugins + Scripts",
+  "Toolkits + Templates",
+  "Comics + Storytelling",
+  "Voxta Content",
+  "Demo + Lite",
+  "Guides",
+  "Other",
+];
+
+function HubInfoSection({
+  pkg,
+  viewMode,
+  onReload,
+  onActionResult,
+}: {
+  pkg: PackageRow;
+  viewMode: "simple" | "tagged" | "fetched";
+  onReload: () => void;
+  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
+}) {
+  const isFetched = viewMode === "fetched";
+  const isMatched = pkg.hub_resource_id != null;
   const isOffsite = pkg.hub_is_hub_hosted === 0;
   const tier = pkg.hub_billing_tier ?? "free";
-  const tierLabel = tier === "paid-early-access" ? "Paid (Early Access)"
-    : tier === "paid" ? "Paid"
-    : "Free";
+  const tierLabel =
+    tier === "paid-early-access"
+      ? "Paid (Early Access)"
+      : tier === "paid"
+        ? "Paid"
+        : "Free";
+
+  // The "Override category/type" button consolidates two backend axes
+  // under one slot: in Fetched mode it sets hub_category (the axis driving
+  // the toolbar's HubCategoryChips); in Simple/Tagged it sets the local
+  // heuristic package_type (the axis driving TypeChips). One button, two
+  // commands, picked per current view.
+  const classifyLabel = isFetched ? "Override category…" : "Override type…";
+  const classifyOptions: readonly string[] = isFetched
+    ? HUB_CATEGORIES
+    : PACKAGE_TYPES;
+  const classifyCurrent = isFetched
+    ? pkg.hub_category ?? "Scenes"
+    : pkg.package_type;
+
+  // Inline action state. Kept local to the section so reopening DetailView
+  // resets everything cleanly (the section unmounts with the modal).
+  // Feedback no longer lives here — it bubbles up to App.tsx's Toast so
+  // it survives the post-action refetch that briefly unmounts this section.
+  const [showPin, setShowPin] = useState(false);
+  const [pinUrl, setPinUrl] = useState("");
+  const [busy, setBusy] = useState<"pin" | "classify" | "author" | null>(null);
+  const [showClassify, setShowClassify] = useState(false);
+  const [classifyDraft, setClassifyDraft] = useState<string>(classifyCurrent);
+  const [showAuthor, setShowAuthor] = useState(false);
+  const [authorDraft, setAuthorDraft] = useState(pkg.hub_author ?? "");
+
+  // Keep the dropdown's initial selection in sync with the current axis
+  // when the user flips viewMode while the section is mounted (e.g.
+  // opening DetailView in Simple then switching to Fetched).
+  useEffect(() => {
+    setClassifyDraft(classifyCurrent);
+    setShowClassify(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFetched, pkg.package_type, pkg.hub_category]);
+
+  async function handlePin() {
+    if (!pinUrl.trim() || busy) return;
+    setBusy("pin");
+    try {
+      const report = await setHubPin([pkg.id], pinUrl);
+      if (!report.any_succeeded) {
+        const r = report.results[0];
+        onActionResult({
+          kind: "error",
+          text: `Pin failed: ${r?.status ?? "unknown"}${r?.detail ? ` — ${r.detail}` : ""}`,
+        });
+        return;
+      }
+      const r = report.results[0];
+      const sib = report.siblings_updated;
+      const auth = report.authors_updated;
+      let msg = r.method === "override" ? "Overrode hub pin." : "Linked to hub.";
+      if (sib + auth > 0) {
+        msg += ` The match will be applied to ${sib + auth} related row${
+          sib + auth === 1 ? "" : "s"
+        } over the next few minutes — each one is verified against the hub at the configured sync rate.`;
+      } else {
+        msg += " Metadata fills in on the next hub sync.";
+      }
+      onActionResult({ kind: "ok", text: msg });
+      setShowPin(false);
+      setPinUrl("");
+      onReload();
+    } catch (e) {
+      onActionResult({ kind: "error", text: `Pin error: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleClassify() {
+    if (!classifyDraft || busy) return;
+    setBusy("classify");
+    try {
+      let msg: string;
+      if (isFetched) {
+        const report = await setHubCategory([pkg.id], classifyDraft);
+        const sib = report.siblings_updated;
+        msg =
+          sib > 0
+            ? `Updated category for ${report.directly_updated} package${
+                report.directly_updated === 1 ? "" : "s"
+              } and ${sib} sibling version${sib === 1 ? "" : "s"}. Auto-sync will keep this override.`
+            : "Updated category. Auto-sync will keep this override.";
+      } else {
+        const report = await setPackageType(
+          [pkg.id],
+          classifyDraft as PackageType,
+        );
+        const sib = report.siblings_updated;
+        msg =
+          sib > 0
+            ? `Set type to ${classifyDraft}. ${sib} sibling version${
+                sib === 1 ? "" : "s"
+              } updated. Scanner will preserve this on rescan.`
+            : `Set type to ${classifyDraft}. Scanner will preserve this on rescan.`;
+      }
+      onActionResult({ kind: "ok", text: msg });
+      setShowClassify(false);
+      onReload();
+    } catch (e) {
+      onActionResult({
+        kind: "error",
+        text: `${isFetched ? "Category" : "Type"} override error: ${e}`,
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleAuthor() {
+    if (!authorDraft.trim() || busy) return;
+    setBusy("author");
+    try {
+      const report = await setHubAuthor([pkg.id], authorDraft);
+      const others = report.authors_updated;
+      const msg =
+        others > 0
+          ? `Updated author. ${others} other package${
+              others === 1 ? "" : "s"
+            } by ${pkg.creator || "this creator"} picked up the same override. Auto-sync will keep it.`
+          : "Updated author. Auto-sync will keep this override.";
+      onActionResult({ kind: "ok", text: msg });
+      setShowAuthor(false);
+      onReload();
+    } catch (e) {
+      onActionResult({ kind: "error", text: `Author error: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Generic clear-override helper used by all three ↺ buttons + the
+  // Unpin button. Toast wording adapts to which field was cleared.
+  async function handleClearOverride(field: OverrideField) {
+    if (busy) return;
+    try {
+      const report = await clearOverride([pkg.id], field);
+      const n = report.rows_updated;
+      const label =
+        field === "category"
+          ? "Category override cleared"
+          : field === "author"
+            ? "Author override cleared"
+            : field === "type"
+              ? "Type override cleared"
+              : "Unpinned";
+      const msg =
+        n > 1
+          ? `${label} (${n} rows touched). Auto-sync may now update this field.`
+          : `${label}. Auto-sync may now update this field.`;
+      onActionResult({ kind: "ok", text: msg });
+      onReload();
+    } catch (e) {
+      onActionResult({
+        kind: "error",
+        text: `Clear ${field} failed: ${e}`,
+      });
+    }
+  }
+
   return (
     <section className="detail-hub-info">
-      <h4>Hub</h4>
-      <div className="detail-hub-title">{pkg.hub_title}</div>
-      <div className="detail-hub-meta">
-        <span className={`hub-tier-badge hub-tier-${tier.replace(/[^a-z-]/g, "")}`}>
-          {tierLabel}
-        </span>
-        {pkg.hub_category && (
-          <span className="hub-tier-badge hub-tier-category">{pkg.hub_category}</span>
-        )}
-        {pkg.hub_license && (
-          <span className="hub-tier-badge hub-tier-license">{pkg.hub_license}</span>
-        )}
-        {pkg.hub_match_method && (
-          <span
-            className="hub-tier-badge hub-tier-method"
-            title={`Match method: ${pkg.hub_match_method}`}
-          >
-            via {pkg.hub_match_method}
+      <h4>{isFetched ? "Hub" : "Overrides"}</h4>
+      {isFetched &&
+        (isMatched ? (
+          <>
+            <div className="detail-hub-title">
+              {pkg.hub_title ?? "(metadata pending)"}
+            </div>
+            <div className="detail-hub-meta">
+              <span
+                className={`hub-tier-badge hub-tier-${tier.replace(/[^a-z-]/g, "")}`}
+              >
+                {tierLabel}
+              </span>
+              {pkg.hub_category && (
+                <>
+                  <span
+                    className={`hub-tier-badge hub-tier-category ${
+                      pkg.hub_category_manual === 1 ? "hub-tier-locked" : ""
+                    }`}
+                    title={
+                      pkg.hub_category_manual === 1
+                        ? "Category is locked by user override — auto-sync won't change it."
+                        : undefined
+                    }
+                  >
+                    {pkg.hub_category_manual === 1 ? "🔒 " : ""}
+                    {pkg.hub_category}
+                  </span>
+                  {pkg.hub_category_manual === 1 &&
+                    pkg.hub_category_original &&
+                    pkg.hub_category_original !== pkg.hub_category && (
+                      <span
+                        className="override-original"
+                        title="Hub category before your override. Restore to revert."
+                      >
+                        was {pkg.hub_category_original}
+                      </span>
+                    )}
+                </>
+              )}
+              {pkg.hub_license && (
+                <span className="hub-tier-badge hub-tier-license">
+                  {pkg.hub_license}
+                </span>
+              )}
+              {pkg.hub_match_method && (
+                <span
+                  className={`hub-tier-badge hub-tier-method hub-tier-method-${pkg.hub_match_method}`}
+                  title={methodTooltip(pkg.hub_match_method)}
+                >
+                  via {pkg.hub_match_method}
+                </span>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="detail-hub-empty">
+            Not linked to a hub resource. Pin a URL below to establish the
+            link; metadata fills in on the next sync.
+          </div>
+        ))}
+      {/* hub_author isn't surfaced as a primary badge above, but when the
+          user has overridden it, show a line so they can see what's set
+          vs. what the hub reported. Renders in all view modes because
+          the override propagates author-wide. */}
+      {pkg.hub_author_manual === 1 && (
+        <div className="detail-hub-author-override">
+          <span className="override-lock" title="Author override is locked.">
+            🔒
           </span>
-        )}
-      </div>
+          <span> author: </span>
+          <strong>{pkg.hub_author ?? "(empty)"}</strong>
+          {pkg.hub_author_original &&
+            pkg.hub_author_original !== pkg.hub_author && (
+              <span className="override-original">
+                was {pkg.hub_author_original}
+              </span>
+            )}
+        </div>
+      )}
+
       <div className="detail-action-row">
-        {pkg.hub_url && (
+        {isFetched && pkg.hub_url && (
           <button
             type="button"
             className="detail-action"
@@ -394,7 +768,7 @@ function HubInfoSection({ pkg }: { pkg: PackageRow }) {
             Open on hub
           </button>
         )}
-        {isOffsite && pkg.hub_external_url && (
+        {isFetched && isOffsite && pkg.hub_external_url && (
           <button
             type="button"
             className="detail-action"
@@ -404,9 +778,216 @@ function HubInfoSection({ pkg }: { pkg: PackageRow }) {
             Buy at source ↗
           </button>
         )}
+        {isFetched && (
+          <>
+            <button
+              type="button"
+              className="detail-action"
+              onClick={() => {
+                setShowPin((v) => !v);
+                setShowClassify(false);
+                setShowAuthor(false);
+              }}
+            >
+              {isMatched ? "Pin to different URL…" : "Pin to hub URL…"}
+            </button>
+            {/* Unpin shows only when this row's link came from a user pin —
+                auto-matches don't need a UI unpin (they get re-evaluated
+                by sync). For inherited rows the user can just re-pin
+                source instead. */}
+            {(pkg.hub_match_method === "manual" ||
+              pkg.hub_match_method === "override") && (
+              <button
+                type="button"
+                className="detail-action detail-action-restore"
+                onClick={() => handleClearOverride("pin")}
+                title="Unpin: clear this package's hub linkage. Preserves any locked category / author."
+                disabled={busy !== null}
+              >
+                ↺ Unpin
+              </button>
+            )}
+          </>
+        )}
+        <button
+          type="button"
+          className="detail-action"
+          onClick={() => {
+            setShowClassify((v) => !v);
+            setShowPin(false);
+            setShowAuthor(false);
+          }}
+          title={
+            isFetched
+              ? "Override the hub_category for this package — protected from auto-sync overwrites"
+              : "Override the local package_type — kept across rescans, propagates to sibling versions"
+          }
+        >
+          {classifyLabel}
+        </button>
+        {((isFetched && pkg.hub_category_manual === 1) ||
+          (!isFetched && pkg.package_type_manual === 1)) && (
+          <button
+            type="button"
+            className="detail-action detail-action-restore"
+            onClick={() =>
+              handleClearOverride(isFetched ? "category" : "type")
+            }
+            title={
+              isFetched
+                ? "Release the category lock — auto-sync may overwrite hub_category on next pass."
+                : "Release the type lock — scanner may reclassify on next rescan."
+            }
+            disabled={busy !== null}
+          >
+            ↺ Restore
+          </button>
+        )}
+        <button
+          type="button"
+          className="detail-action"
+          onClick={() => {
+            setShowAuthor((v) => !v);
+            setShowPin(false);
+            setShowClassify(false);
+          }}
+          title={`Set the canonical hub author for ${pkg.creator || "this creator"}. Propagates to every other package by the same creator and is protected from auto-sync overwrites.`}
+        >
+          Override author…
+        </button>
+        {pkg.hub_author_manual === 1 && (
+          <button
+            type="button"
+            className="detail-action detail-action-restore"
+            onClick={() => handleClearOverride("author")}
+            title="Release the author lock — auto-sync may overwrite hub_author on next pass for every package by this creator."
+            disabled={busy !== null}
+          >
+            ↺ Restore
+          </button>
+        )}
       </div>
+
+      {showPin && (
+        <div className="detail-hub-pin-row">
+          <input
+            type="text"
+            value={pinUrl}
+            onChange={(e) => setPinUrl(e.target.value)}
+            placeholder="https://hub.virtamate.com/resources/…  or  37103"
+            disabled={busy === "pin"}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handlePin();
+              if (e.key === "Escape") setShowPin(false);
+            }}
+            autoFocus
+          />
+          <button
+            type="button"
+            className="detail-action detail-action-primary"
+            onClick={handlePin}
+            disabled={!pinUrl.trim() || busy === "pin"}
+          >
+            {busy === "pin" ? "Pinning…" : "Pin"}
+          </button>
+          <button
+            type="button"
+            className="detail-action"
+            onClick={() => {
+              setShowPin(false);
+              setPinUrl("");
+            }}
+            disabled={busy === "pin"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {showClassify && (
+        <div className="detail-hub-pin-row">
+          <select
+            value={classifyDraft}
+            onChange={(e) => setClassifyDraft(e.target.value)}
+            disabled={busy === "classify"}
+          >
+            {classifyOptions.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="detail-action detail-action-primary"
+            onClick={handleClassify}
+            disabled={busy === "classify"}
+          >
+            {busy === "classify" ? "Applying…" : "Apply"}
+          </button>
+          <button
+            type="button"
+            className="detail-action"
+            onClick={() => setShowClassify(false)}
+            disabled={busy === "classify"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {showAuthor && (
+        <div className="detail-hub-pin-row">
+          <input
+            type="text"
+            value={authorDraft}
+            onChange={(e) => setAuthorDraft(e.target.value)}
+            placeholder={`Canonical hub author for ${pkg.creator || "this creator"}`}
+            disabled={busy === "author"}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleAuthor();
+              if (e.key === "Escape") setShowAuthor(false);
+            }}
+            autoFocus
+          />
+          <button
+            type="button"
+            className="detail-action detail-action-primary"
+            onClick={handleAuthor}
+            disabled={!authorDraft.trim() || busy === "author"}
+          >
+            {busy === "author" ? "Applying…" : "Apply"}
+          </button>
+          <button
+            type="button"
+            className="detail-action"
+            onClick={() => setShowAuthor(false)}
+            disabled={busy === "author"}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
     </section>
   );
+}
+
+function methodTooltip(method: string): string {
+  switch (method) {
+    case "filename":
+      return "Matched by exact .var filename on the hub CDN.";
+    case "fuzzy_title":
+      return "Matched by fuzzy title search (paid-fallback path).";
+    case "manual":
+      return "You pinned this package to a hub URL. Auto-sync will not overwrite this match.";
+    case "override":
+      return "You overrode a prior auto-match by pinning a different hub URL. Auto-sync will not overwrite this.";
+    case "inherit":
+      return "Inherited from a sibling version's hub match. Will be verified on the next hub sync.";
+    default:
+      return `Match method: ${method}`;
+  }
 }
 
 const GALLERY_INITIAL_CAP = 60;

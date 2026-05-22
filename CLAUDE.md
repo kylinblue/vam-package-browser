@@ -6,9 +6,14 @@ The primary UI is a virtualized thumbnail grid (NOT a table). Browsing should fe
 
 ## Read-only invariant (critical)
 
-The user's `.var` library — by default `D:\Games\VAM\AddonPackages` — is **strictly read-only**. The scanner opens `.var` files via read-only file handles and never writes back. All caches (`thumbnails/`, `index.sqlite`) live under `%APPDATA%\com.github.kylinblue.vam-package-browser\` (Tauri bundle-identifier path), never inside AddonPackages.
+The user's `.var` library is **strictly read-only**. The scanner opens `.var` files via read-only file handles and never writes back. All caches (`thumbnails/`, `index.sqlite`) live under `%APPDATA%\com.github.kylinblue.vam-package-browser\` (Tauri bundle-identifier path), never inside the library.
 
-The future "visibility presets" feature WILL eventually create/move/symlink package files, but only into a *separate* active folder, with explicit user confirmation and a dry-run preview. It must never mutate the master library.
+**Which folder is the library shifts after the Visibility-Presets setup wizard runs.** Code that handles `.var` files must respect the read-only invariant on whichever folder currently holds them, derived from the `setup_complete` setting (`app_settings.value` keyed by `setup_complete`).
+
+- **Before Visibility-Presets setup** (legacy / new installs): the library is `addon_root` (default `D:\Games\VAM\AddonPackages` — wherever the user originally pointed the scanner). VaM also reads from this path. Read-only invariant applies here.
+- **After Visibility-Presets setup**: the library has been migrated to `managed_root` (default `D:\Games\VAM\AddonPackages_Managed`). Read-only invariant moves with it. `addon_root` becomes the *active folder* — VaM still reads from it, but our tool freely populates and clears it via NTFS hardlinks pointing back to `managed_root`. The two folders must share a volume; the wizard enforces that with `GetVolumeInformationW`.
+
+The Visibility-Presets setup wizard (`src-tauri/src/setup.rs::begin_migration`) is the *only* code path permitted to mutate the library — and only as the one-time migration that establishes the post-setup model. Materialization writes (`src-tauri/src/materialize.rs::load` / `unload_all`) write into the active folder, never into the library.
 
 ## Multi-session coordination
 
