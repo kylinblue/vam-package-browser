@@ -5,6 +5,7 @@ import { DetailView } from "./components/DetailView";
 import { FacetPanel } from "./components/FacetPanel";
 import { HubSyncView } from "./components/HubSyncView";
 import { PackageGrid } from "./components/PackageGrid";
+import { LoadVisibilityModal } from "./components/LoadVisibilityModal";
 import { SelectionActionBar } from "./components/SelectionActionBar";
 import { SetupWizard } from "./components/SetupWizard";
 import { StatsPanel } from "./components/StatsPanel";
@@ -160,6 +161,14 @@ export default function App() {
   const [setupComplete, setSetupComplete] = useState(false);
   const [managedRoot, setManagedRoot] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
+  // Active load-visibility modal. `null` = closed. Carries the package
+  // ids the user selected when they clicked "Set visibility…" — modal
+  // is also reachable for unload-all by passing an empty/null selection
+  // via a separate trigger.
+  const [visibilityModalIds, setVisibilityModalIds] = useState<
+    number[] | null
+  >(null);
+  const [visibilityModalOpen, setVisibilityModalOpen] = useState(false);
 
   // Batch thumb-progress events so we don't re-render per-image.
   const pendingVersionsRef = useRef<Record<number, number>>({});
@@ -972,6 +981,10 @@ export default function App() {
           setSelectionAnchor(null);
         }}
         onActionResult={handleActionResult}
+        onSetVisibility={(ids) => {
+          setVisibilityModalIds(ids);
+          setVisibilityModalOpen(true);
+        }}
       />
 
       <Toast toast={toast} onDismiss={() => setToast(null)} />
@@ -987,6 +1000,23 @@ export default function App() {
           onClose={() => {
             setWizardOpen(false);
             refreshSetupState().catch(() => {});
+          }}
+        />
+      )}
+
+      {visibilityModalOpen && (
+        <LoadVisibilityModal
+          selection={visibilityModalIds}
+          setupComplete={setupComplete}
+          onActionResult={handleActionResult}
+          onClose={() => {
+            setVisibilityModalOpen(false);
+            setVisibilityModalIds(null);
+            // Clear the grid selection after a successful load so the
+            // user has a clean slate for the next action. (handleActionResult
+            // already refreshed grid + aggregates if the load succeeded.)
+            setSelectedIds(new Set());
+            setSelectionAnchor(null);
           }}
         />
       )}

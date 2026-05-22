@@ -169,6 +169,7 @@ pub fn run() {
             commands::load_visibility,
             commands::unload_all,
             commands::verify_active_folder,
+            commands::compute_load_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

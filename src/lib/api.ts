@@ -433,6 +433,46 @@ export async function verifyActiveFolder(): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_active_folder");
 }
 
+export interface UnresolvedDep {
+  src_package_id: number;
+  raw_dep_key: string;
+}
+
+export interface ClosurePreview {
+  /** Packages pulled in by author seeds (intersected with closure). */
+  from_authors: number;
+  /** Packages from explicit package seeds NOT already covered by authors. */
+  from_packages: number;
+  /** Packages added only via transitive dep resolution, not directly seeded. */
+  from_deps: number;
+  /** Total resolved ids in the closure. */
+  total: number;
+  /** All package ids in the closure (sorted). */
+  package_ids: number[];
+  /** Dep keys that referenced a non-installed package, paired with the
+   *  closure-resident package that referenced them. */
+  unresolved: UnresolvedDep[];
+}
+
+export interface LoadPlan {
+  /** Closure breakdown (counts + ids + unresolved). */
+  preview: ClosurePreview;
+  /** Count of rows currently in active_folder_state. */
+  currently_loaded: number;
+  /** Packages that would be newly hardlinked on commit. */
+  will_add: number;
+  /** Packages that would be unlinked (in current but not in target). */
+  will_remove: number;
+  /** Packages already correctly materialized — no FS touch. */
+  will_keep: number;
+}
+
+/** Dry-run for the load-visibility modal: closure + diff against the
+ *  current active folder. Cheap (pure SQL). */
+export async function computeLoadPlan(seeds: SeedSpec): Promise<LoadPlan> {
+  return invoke<LoadPlan>("compute_load_plan", { seeds });
+}
+
 export interface ThumbProgress {
   id: number;
   ok: boolean;

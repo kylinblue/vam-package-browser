@@ -174,6 +174,54 @@ pub fn unload_all(conn: &mut Connection) -> Result<LoadResult> {
     load(conn, &SeedSpec::default())
 }
 
+/// Dry-run for the load-visibility modal: closure preview + diff
+/// against the current `active_folder_state`. Lets the UI render
+/// "+A / −R / =K" before the user commits, without doing the FS work
+/// twice. Pure SQL, no FS touch.
+pub fn compute_load_plan(
+    conn: &Connection,
+    target_seeds: &SeedSpec,
+) -> Result<LoadPlan> {
+    let preview = crate::visibility::compute_preview(conn, target_seeds)?;
+    let target: HashSet<i64> = preview.package_ids.iter().copied().collect();
+
+    let current: HashSet<i64> = {
+        let mut stmt = conn.prepare("SELECT package_id FROM active_folder_state")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        ids
+    };
+
+    let will_keep = target.intersection(&current).count() as i64;
+    let will_add = (target.len() as i64) - will_keep;
+    let will_remove = (current.len() as i64) - will_keep;
+
+    Ok(LoadPlan {
+        currently_loaded: current.len() as i64,
+        will_add,
+        will_remove,
+        will_keep,
+        preview,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadPlan {
+    /// Closure preview (counts + ids + unresolved deps). Carries through
+    /// to the UI so it can show the author/package/dep breakdown.
+    pub preview: crate::visibility::ClosurePreview,
+    /// Count of rows currently in `active_folder_state`.
+    pub currently_loaded: i64,
+    /// Packages that would be newly hardlinked on commit.
+    pub will_add: i64,
+    /// Packages that would be unlinked (they're in the current active
+    /// set but not in the closure of `target_seeds`).
+    pub will_remove: i64,
+    /// Packages already correctly materialized — no FS touch needed.
+    pub will_keep: i64,
+}
+
 /// Walk every row in `active_folder_state` and report which entries are
 /// still healthy. Read-only — does not mutate the ledger. Caller decides
 /// whether to fix stale rows (call `load` to re-converge, or use a
@@ -729,6 +777,47 @@ mod tests {
 
         let res = verify_active_folder(&conn).unwrap();
         assert_eq!(res.missing_in_managed, vec![1]);
+    }
+
+    #[test]
+    fn load_plan_breaks_down_add_remove_keep() {
+        let (_w, _addon, managed, mut conn) = fixture();
+        add_pkg(&managed, &conn, 1, "Alice", "Foo");
+        add_pkg(&managed, &conn, 2, "Alice", "Bar");
+        add_pkg(&managed, &conn, 3, "Bob", "Baz");
+
+        // Pre-load Alice's set.
+        load(
+            &mut conn,
+            &SeedSpec {
+                creators: vec!["Alice".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        // Plan a switch to Alice + Bob: Alice's 2 stay (keep),
+        // Bob's 1 gets added.
+        let plan = compute_load_plan(
+            &conn,
+            &SeedSpec {
+                creators: vec!["Alice".into(), "Bob".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.currently_loaded, 2);
+        assert_eq!(plan.will_add, 1);
+        assert_eq!(plan.will_remove, 0);
+        assert_eq!(plan.will_keep, 2);
+        assert_eq!(plan.preview.total, 3);
+
+        // Plan an unload-all: 2 currently loaded → 0 target = remove 2.
+        let plan = compute_load_plan(&conn, &SeedSpec::default()).unwrap();
+        assert_eq!(plan.currently_loaded, 2);
+        assert_eq!(plan.will_add, 0);
+        assert_eq!(plan.will_remove, 2);
+        assert_eq!(plan.will_keep, 0);
     }
 
     #[test]

@@ -519,6 +519,19 @@ pub fn verify_active_folder(
     crate::materialize::verify_active_folder(&conn).map_err(map_err)
 }
 
+/// Dry-run for the LoadVisibilityModal: closure preview + diff against
+/// the current active folder. Returns total counts + (will_add,
+/// will_remove, will_keep) so the UI can show "+A / −R / =K" before
+/// the user commits to `load_visibility`. Pure SQL.
+#[tauri::command]
+pub fn compute_load_plan(
+    state: State<'_, AppState>,
+    seeds: crate::visibility::SeedSpec,
+) -> Result<crate::materialize::LoadPlan, String> {
+    let conn = state.db.lock();
+    crate::materialize::compute_load_plan(&conn, &seeds).map_err(map_err)
+}
+
 #[tauri::command]
 pub fn set_favorite(
     state: State<'_, AppState>,
