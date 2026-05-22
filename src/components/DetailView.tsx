@@ -286,6 +286,33 @@ export function DetailView({
                   <span>· VaM {pkg.program_version}</span>
                 )}
               </div>
+              {/* Always-visible override status row — gives the user a
+                  one-glance picture of which classification fields are
+                  user-locked vs. auto-assigned, with the pre-override
+                  value when applicable. Renders the same shape whether
+                  anything is overridden or not, so the eye learns where
+                  to look. */}
+              <div className="detail-overrides">
+                <span className="detail-overrides-label">Overrides</span>
+                <OverrideStatus
+                  label="Type"
+                  current={pkg.package_type}
+                  manual={pkg.package_type_manual === 1}
+                  original={pkg.package_type_original}
+                />
+                <OverrideStatus
+                  label="Category"
+                  current={pkg.hub_category ?? "—"}
+                  manual={pkg.hub_category_manual === 1}
+                  original={pkg.hub_category_original}
+                />
+                <OverrideStatus
+                  label="Author"
+                  current={pkg.hub_author ?? pkg.creator ?? "—"}
+                  manual={pkg.hub_author_manual === 1}
+                  original={pkg.hub_author_original}
+                />
+              </div>
             </div>
 
             <div className="detail-body">
@@ -928,6 +955,47 @@ function HubInfoSection({
       )}
 
     </section>
+  );
+}
+
+interface OverrideStatusProps {
+  label: string;
+  current: string;
+  manual: boolean;
+  original: string | null;
+}
+
+/// Compact pill showing one overrideable field's current state + lock
+/// status + pre-override value. Always rendered (even when not locked)
+/// so the user can scan the header to find what's overridden at a
+/// glance — the "no matter if overridden or not" requirement.
+function OverrideStatus({
+  label,
+  current,
+  manual,
+  original,
+}: OverrideStatusProps) {
+  const showOriginal = manual && original && original !== current;
+  return (
+    <span
+      className={`override-chip ${manual ? "override-chip-locked" : ""}`}
+      title={
+        manual
+          ? `${label}: ${current} — locked by user override${
+              showOriginal ? `; was ${original} before` : ""
+            }`
+          : `${label}: ${current} — auto (no override)`
+      }
+    >
+      <span className="override-chip-lock" aria-hidden="true">
+        {manual ? "🔒" : "·"}
+      </span>
+      <span className="override-chip-label">{label}</span>
+      <span className="override-chip-value">{current}</span>
+      {showOriginal && (
+        <span className="override-chip-was">← was {original}</span>
+      )}
+    </span>
   );
 }
 

@@ -1884,6 +1884,65 @@ html, body, #root {
   font-weight: 500;
 }
 
+/* Always-visible override status row in the detail header. Shows the
+   current value + lock state for each of the three classification
+   fields. Renders with the same chrome whether anything is overridden
+   or not — the user learns where to scan and the layout doesn't shift
+   when they toggle a lock. */
+.detail-overrides {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.detail-overrides-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  color: var(--fg-dim);
+  margin-right: 2px;
+}
+.override-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.override-chip-locked {
+  border-color: rgba(122, 162, 255, 0.55);
+  background: rgba(122, 162, 255, 0.10);
+  color: var(--fg);
+}
+.override-chip-lock {
+  font-size: 10px;
+}
+.override-chip-label {
+  color: var(--fg-dim);
+  font-size: 10px;
+}
+.override-chip-locked .override-chip-label {
+  color: var(--accent);
+}
+.override-chip-value {
+  color: var(--fg);
+  font-weight: 500;
+}
+.override-chip-locked .override-chip-value {
+  color: var(--accent);
+}
+.override-chip-was {
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
 /* Author override row sits below the hub-meta badges (or as the only
    override-info element when the package isn't hub-matched). */
 .detail-hub-author-override {
