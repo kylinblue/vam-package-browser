@@ -129,6 +129,7 @@ pub fn run() {
             commands::list_creators_with_counts,
             commands::list_type_counts,
             commands::list_hub_categories,
+            commands::count_hub_unidentified,
             commands::list_namespaces,
             commands::list_tag_counts,
             commands::search_families,

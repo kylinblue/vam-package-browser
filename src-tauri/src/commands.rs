@@ -129,6 +129,13 @@ pub struct QueryFilter {
     /// (case-sensitive — hub categories are canonical display strings like
     /// "Looks", "Plugins + Scripts").
     pub hub_category: Option<String>,
+    /// When true, restrict to packages with no hub category (= not currently
+    /// matched). Acts as a "virtual" chip alongside hub_category so the user
+    /// can browse the residual that the sync didn't resolve. Mutually
+    /// exclusive with hub_category — if both are set, hub_category wins
+    /// (real category implies matched, so unmatched=true contradicts it).
+    #[serde(default)]
+    pub hub_unmatched: bool,
 }
 
 #[tauri::command]
@@ -590,6 +597,114 @@ fn norm_key(creator: &str, package: &str) -> String {
 /// without misjudging medium creators.
 const L_BROADCAST_SHORTCUT: usize = 2;
 
+/// Look up resources in the cached `hub_resources` sitemap catalog whose
+/// normalized slug matches any of `locals`' normalized package names,
+/// skipping resources already covered by `excluded_ids` (typically the XF
+/// search result set so we don't double-fetch).
+///
+/// Why this exists: XF's per-author search returns its own ranked listing
+/// that buries older resources in deep pagination tails. Resources we
+/// know about via the sitemap can be `not_found` after the regular sync
+/// purely because the search didn't surface them — not because they
+/// aren't matchable. The slug-match tier hits the resource page directly
+/// (one GET per candidate) and adds it to the same HEAD-probe pipeline
+/// the broad search feeds, so verification (CDN filename must equal
+/// `Creator.Package.Version.var`) is identical.
+///
+/// Only **unique** slug → package-name matches are returned. If two
+/// hub resources normalize to the same slug we treat it as ambiguous
+/// and skip both — caller can fall back to the existing search-based
+/// flow without a wrong-author false positive.
+///
+/// Errors fetching a resource page (network / parse) are logged but
+/// non-fatal; the function keeps going so one bad slug doesn't stall a
+/// whole creator.
+fn slug_cache_extras_for_creator(
+    creator: &str,
+    locals: &[LocalPkg],
+    client: &hub::HubClient,
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    excluded_ids: &std::collections::HashSet<i64>,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    rate_limit_ms: u64,
+) -> Vec<hub::HubMatch> {
+    use std::collections::{HashMap, HashSet};
+
+    // Normalize-pkg → list of locals using that name. (Locals are already
+    // grouped by creator at the caller, so name collisions are the only
+    // dedup work here.)
+    let mut by_norm: HashMap<String, ()> = HashMap::new();
+    for l in locals {
+        by_norm.insert(hub::normalize_compare(&l.package_name), ());
+    }
+    if by_norm.is_empty() {
+        return Vec::new();
+    }
+
+    // Scan the cached catalog for unique-slug hits. Bounded by hub_resources
+    // table size (~45k rows) -- fast enough at per-creator granularity, and
+    // avoids the complexity of a globally-shared slug index.
+    let candidates: Vec<(i64, String)> = {
+        let conn = db.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT resource_id, slug FROM hub_resources") else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        }) else {
+            return Vec::new();
+        };
+        let mut hits: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+        for row in rows.flatten() {
+            let norm = hub::normalize_compare(&row.1);
+            if by_norm.contains_key(&norm) {
+                hits.entry(norm).or_default().push(row);
+            }
+        }
+        // Keep only norms that mapped to exactly one slug; drop ambiguous.
+        hits.into_iter()
+            .filter_map(|(_k, v)| {
+                if v.len() == 1 {
+                    Some(v.into_iter().next().unwrap())
+                } else {
+                    None
+                }
+            })
+            .filter(|(id, _)| !excluded_ids.contains(id))
+            .collect()
+    };
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen_ids: HashSet<i64> = HashSet::new();
+    let mut out = Vec::with_capacity(candidates.len());
+    for (id, slug) in candidates {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if !seen_ids.insert(id) {
+            continue;
+        }
+        match client.fetch_resource_page(&slug, id) {
+            Ok(hm) => out.push(hm),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.starts_with("gate:") {
+                    eprintln!("hub sync slug-cache: gated on {slug}.{id} — aborting");
+                    return out;
+                }
+                eprintln!(
+                    "hub sync slug-cache: fetch_resource_page failed for {slug}.{id} (creator {creator}): {msg}"
+                );
+            }
+        }
+        sleep_with_cancel(rate_limit_ms, cancel);
+    }
+    out
+}
+
 fn sync_one_creator(
     creator: &str,
     locals: &[LocalPkg],
@@ -642,7 +757,7 @@ fn sync_one_creator(
         "info",
         format!("▶ {creator}: searching ({} local)…", locals.len()),
     );
-    let hub_resources = match client.search_resources_by_user(creator) {
+    let mut hub_resources = match client.search_resources_by_user(creator) {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("{e:#}");
@@ -680,6 +795,38 @@ fn sync_one_creator(
     if cancel.load(Ordering::Relaxed) {
         return false;
     }
+
+    // Slug-cache augmentation: pull in resources whose cached sitemap slug
+    // normalizes to one of this creator's local package names but which the
+    // XF per-author search didn't return (search-tail issue). Each extra
+    // candidate goes through the SAME HEAD-probe verification path below,
+    // so a wrong-author slug collision (e.g. local "Eloise" matching some
+    // other creator's "eloise" resource) is rejected when the CDN filename
+    // doesn't carry the expected Creator.Package prefix.
+    let xf_ids: std::collections::HashSet<i64> =
+        hub_resources.iter().map(|hr| hr.resource_id).collect();
+    let slug_extras = slug_cache_extras_for_creator(
+        creator,
+        locals,
+        client,
+        db,
+        &xf_ids,
+        cancel,
+        rate_limit_ms,
+    );
+    let slug_match_ids: std::collections::HashSet<i64> =
+        slug_extras.iter().map(|hr| hr.resource_id).collect();
+    if !slug_extras.is_empty() {
+        emit_log(
+            app,
+            "info",
+            format!(
+                "  {creator}: +{} slug-cache candidate(s) (XF search missed)",
+                slug_extras.len()
+            ),
+        );
+    }
+    hub_resources.extend(slug_extras);
 
     // Build the canonical-filename map (hub-hosted) and a fuzzy fallback set
     // (paid). For each hub resource:
@@ -772,7 +919,16 @@ fn sync_one_creator(
             Option<&hub::HubMatch>,
             Option<&str>,
         ) = if let Some((hm, _)) = filename_map.get(&key) {
-            ("matched", Some("filename"), Some(hm), None)
+            // Filename-tier match: but if the candidate originated from the
+            // slug-cache augmentation (XF search didn't return it), tag it
+            // as `slug_match` so we can measure recovery from that tier
+            // separately in downstream histograms.
+            let m = if slug_match_ids.contains(&hm.resource_id) {
+                "slug_match"
+            } else {
+                "filename"
+            };
+            ("matched", Some(m), Some(hm), None)
         } else {
             // Fuzzy fallback over paid candidates.
             let best = paid_fallback
@@ -1132,6 +1288,29 @@ fn retry_one_keyword(
         }
     }
 
+    // Slug-cache augmentation for B2: if the cached sitemap catalog has a
+    // unique slug-normalize match for this local, append it to `hits` so it
+    // gets HEAD-probed alongside keyword-search results. Necessary for the
+    // L≤2 shortcut path (which never runs the broad B1 search) and useful
+    // belt-and-braces on the post-B1 path too — XF's keyword search has its
+    // own ranking blind spots.
+    let xf_kw_ids: std::collections::HashSet<i64> =
+        hits.iter().map(|h| h.resource_id).collect();
+    let slug_extras = slug_cache_extras_for_creator(
+        &local.creator,
+        std::slice::from_ref(local),
+        client,
+        db,
+        &xf_kw_ids,
+        cancel,
+        rate_limit_ms,
+    );
+    let slug_match_ids: std::collections::HashSet<i64> =
+        slug_extras.iter().map(|h| h.resource_id).collect();
+    if !slug_extras.is_empty() {
+        hits.extend(slug_extras);
+    }
+
     let target_key = norm_key(&local.creator, &local.package_name);
     let mut filename_hit: Option<hub::HubMatch> = None;
     let mut paid_candidates: Vec<(hub::HubMatch, String)> = Vec::new();
@@ -1178,7 +1357,12 @@ fn retry_one_keyword(
     }
 
     let (hub_match, method, external_url) = if let Some(hm) = filename_hit.as_ref() {
-        (Some(hm), Some("filename"), None)
+        let m = if slug_match_ids.contains(&hm.resource_id) {
+            "slug_match"
+        } else {
+            "filename"
+        };
+        (Some(hm), Some(m), None)
     } else {
         let best = paid_candidates
             .iter()
@@ -1853,6 +2037,7 @@ pub struct HubStatus {
     pub matched: i64,
     pub matched_by_filename: i64,
     pub matched_by_fuzzy_title: i64,
+    pub matched_by_slug_match: i64,
     pub not_found: i64,
     pub failed: i64,
     pub never_synced: i64,
@@ -1906,6 +2091,10 @@ pub fn hub_status(state: State<'_, AppState>) -> Result<HubStatus, String> {
         &conn,
         "hub_sync_state = 'matched' AND hub_match_method = 'fuzzy_title'",
     );
+    let matched_by_slug_match = count_where(
+        &conn,
+        "hub_sync_state = 'matched' AND hub_match_method = 'slug_match'",
+    );
     let not_found = count_where(&conn, "hub_sync_state = 'not_found'");
     let failed = count_where(&conn, "hub_sync_state = 'failed'");
     let never_synced = count_where(&conn, "hub_sync_state IS NULL");
@@ -1952,6 +2141,7 @@ pub fn hub_status(state: State<'_, AppState>) -> Result<HubStatus, String> {
         matched,
         matched_by_filename,
         matched_by_fuzzy_title,
+        matched_by_slug_match,
         not_found,
         failed,
         never_synced,
@@ -2357,6 +2547,22 @@ pub fn list_hub_categories(
     Ok(rows)
 }
 
+/// Count of non-hidden packages with no hub category — the "(unidentified)"
+/// virtual chip alongside the per-category counts. Inverse of
+/// `list_hub_categories`' selection clause: `hub_category IS NULL` covers
+/// never-synced, not_found, failed, and gated rows in one count.
+#[tauri::command]
+pub fn count_hub_unidentified(state: State<'_, AppState>) -> Result<i64, String> {
+    let conn = state.db.lock();
+    conn.query_row(
+        "SELECT COUNT(*) FROM packages
+         WHERE is_hidden = 0 AND hub_category IS NULL",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map_err(map_err)
+}
+
 #[derive(Debug, Serialize)]
 pub struct Namespace {
     pub namespace: String,
@@ -2594,6 +2800,12 @@ fn build_where(filter: &QueryFilter) -> (String, Vec<rusqlite::types::Value>) {
     if let Some(c) = filter.hub_category.as_deref().filter(|s| !s.is_empty()) {
         let i = push_text(&mut binds, c.to_string());
         clauses.push(format!("hub_category = ?{i}"));
+    } else if filter.hub_unmatched {
+        // Mirrors the inverse of `list_hub_categories`' selection clause:
+        // a row is "unmatched" iff it has no hub_category. Includes both
+        // never-synced (hub_sync_state IS NULL) and synced-but-not-matched
+        // (not_found / failed / gate).
+        clauses.push("hub_category IS NULL".to_string());
     }
     if let Some(t) = filter.package_type.as_deref().filter(|s| !s.is_empty()) {
         let i = push_text(&mut binds, t.to_string());

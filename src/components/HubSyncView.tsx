@@ -27,6 +27,10 @@ export function HubSyncView() {
   // Live progress when a sync is running. `null` when idle.
   const [progress, setProgress] = useState<HubSyncProgress | null>(null);
   const [running, setRunning] = useState(false);
+  // True between clicking Stop and the backend actually reporting inactive.
+  // Lets the UI show "Stopping…" so the click visibly registers even when
+  // workers take ~30s to drain in-flight HTTP requests.
+  const [stopping, setStopping] = useState(false);
   const [lastSummary, setLastSummary] = useState<HubSyncSummary | null>(null);
   const [opErr, setOpErr] = useState<string | null>(null);
 
@@ -66,21 +70,37 @@ export function HubSyncView() {
     loadStatus();
   }, [loadStatus]);
 
-  // HMR recovery: check if a backend sync is still running across page
-  // reloads. If yes, flip `running` so the UI reflects the in-flight work
-  // even though the JS-side handlers from the initiating click are gone.
+  // Backstop poll: the UI's `running` state is supposed to flip back
+  // when `await startHubSync()` resolves in onStartSync's finally block.
+  // That awaited promise can resolve slowly (workers draining in-flight
+  // HTTPs after cancel takes up to ~30s) or get orphaned by HMR / React
+  // closure replacement. Treat the backend's `hub_sync_running` atomic as
+  // the source of truth and reconcile our local state to it every 2s.
+  //
+  // This single effect covers both directions:
+  //   - sync started elsewhere (HMR reload, devtools) -> we flip running=true
+  //   - sync ended (stop click, completion, panic) -> we flip running=false
+  //     and clear the optimistic `stopping` flag.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const tick = async () => {
       try {
         const active = await hubSyncActive();
-        if (!cancelled && active) setRunning(true);
+        if (cancelled) return;
+        setRunning((cur) => {
+          if (cur !== active) return active;
+          return cur;
+        });
+        if (!active) setStopping(false);
       } catch {
-        /* ignore */
+        /* transient; retry next tick */
       }
-    })();
+    };
+    tick();
+    const handle = window.setInterval(tick, 2000);
     return () => {
       cancelled = true;
+      window.clearInterval(handle);
     };
   }, []);
 
@@ -210,10 +230,16 @@ export function HubSyncView() {
   }, [creatorFilter, onlyMissing, pullPreview, rateLimitMs, workers, loadStatus]);
 
   const onStopSync = useCallback(async () => {
+    // Optimistically flip the button to "Stopping…" so the click registers
+    // visually. The backstop poll above flips `running` -> false (and
+    // clears `stopping`) once the backend's `hub_sync_running` atomic
+    // settles, which can take up to ~30s for in-flight HTTPs to drain.
+    setStopping(true);
     try {
       await stopHubSync();
     } catch (e) {
       setOpErr(`stop: ${e}`);
+      setStopping(false);
     }
   }, []);
 
@@ -293,6 +319,7 @@ export function HubSyncView() {
               />
               <Stat label="By filename" value={status.matched_by_filename.toLocaleString()} />
               <Stat label="By fuzzy" value={status.matched_by_fuzzy_title.toLocaleString()} />
+              <Stat label="By slug" value={status.matched_by_slug_match.toLocaleString()} />
               <Stat label="Not found" value={status.not_found.toLocaleString()} />
               <Stat label="Never synced" value={status.never_synced.toLocaleString()} />
               <Stat label="Failed" value={status.failed.toLocaleString()} />
@@ -385,8 +412,13 @@ export function HubSyncView() {
               Start sync
             </button>
           ) : (
-            <button type="button" onClick={onStopSync} className="hub-action hub-action-stop">
-              Stop sync
+            <button
+              type="button"
+              onClick={onStopSync}
+              disabled={stopping}
+              className="hub-action hub-action-stop"
+            >
+              {stopping ? "Stopping…" : "Stop sync"}
             </button>
           )}
         </div>

@@ -61,7 +61,7 @@ export interface PackageRow {
   hub_license: string | null;
   hub_lastmod: number | null;
   hub_external_url: string | null;
-  /** "filename" | "fuzzy_title" | "manual" | null. */
+  /** "filename" | "fuzzy_title" | "slug_match" | "manual" | null. */
   hub_match_method: string | null;
 }
 
@@ -105,6 +105,10 @@ export interface QueryFilter {
   /** Hub category filter (Fetched mode primary axis). Exact-match on the
    *  canonical display string returned by the hub (e.g. "Looks"). */
   hub_category?: string;
+  /** When true, restrict to packages with no hub_category (= not currently
+   *  matched). Mutually exclusive with hub_category — hub_category wins
+   *  if both are set. */
+  hub_unmatched?: boolean;
 }
 
 export interface Namespace {
@@ -256,6 +260,12 @@ export async function listHubCategories(): Promise<HubCategoryCount[]> {
   return invoke<HubCategoryCount[]>("list_hub_categories");
 }
 
+/** Count of non-hidden packages with no hub_category (= not currently matched).
+ *  Drives the "(unidentified)" virtual chip alongside listHubCategories. */
+export async function countHubUnidentified(): Promise<number> {
+  return invoke<number>("count_hub_unidentified");
+}
+
 export async function setFavorite(id: number, value: boolean): Promise<void> {
   return invoke("set_favorite", { id, value });
 }
@@ -393,6 +403,7 @@ export interface HubStatus {
   matched: number;
   matched_by_filename: number;
   matched_by_fuzzy_title: number;
+  matched_by_slug_match: number;
   not_found: number;
   failed: number;
   never_synced: number;

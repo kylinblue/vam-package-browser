@@ -11,6 +11,7 @@ import {
   generateThumbnails,
   listCreatorsWithCounts,
   listHubCategories,
+  countHubUnidentified,
   listTypeCounts,
   queryPackages,
   scanLibrary,
@@ -87,6 +88,10 @@ export default function App() {
   // hub resource (hub_resource_id IS NULL).
   const [selectedHubCategory, setSelectedHubCategory] = useState<string | null>(null);
   const [hubCategoryCounts, setHubCategoryCounts] = useState<HubCategoryCount[]>([]);
+  // Virtual "(unidentified)" chip state: when true, hub_category dropdown is
+  // cleared and the query filters to packages without a hub match.
+  const [unidentifiedSelected, setUnidentifiedSelected] = useState(false);
+  const [unidentifiedCount, setUnidentifiedCount] = useState(0);
 
   // Semantic-search state shelved alongside the Ask UI — see the commented
   // toolbar row below and TODO-semantic-search-ui.md. Reactivation: revert
@@ -177,6 +182,9 @@ export default function App() {
           viewMode === "fetched" && selectedHubCategory !== null
             ? selectedHubCategory
             : undefined,
+        // "(unidentified)" virtual chip: also fetched-mode-only.
+        hub_unmatched:
+          viewMode === "fetched" && unidentifiedSelected ? true : undefined,
       };
       const [rows, total] = await Promise.all([
         queryPackages(filter),
@@ -205,19 +213,22 @@ export default function App() {
     creators,
     selectedTags,
     selectedHubCategory,
+    unidentifiedSelected,
     viewMode,
   ]);
 
   const refreshTypeCountsAndCreators = useCallback(async () => {
     try {
-      const [tc, cs, hc] = await Promise.all([
+      const [tc, cs, hc, uc] = await Promise.all([
         listTypeCounts(),
         listCreatorsWithCounts(),
         listHubCategories(),
+        countHubUnidentified(),
       ]);
       setTypeCounts(tc);
       setCreators(cs);
       setHubCategoryCounts(hc);
+      setUnidentifiedCount(uc);
     } catch (e) {
       console.error("refresh aggregates:", e);
     }
@@ -415,7 +426,17 @@ export default function App() {
           <HubCategoryChips
             counts={hubCategoryCounts}
             selected={selectedHubCategory}
-            onSelect={setSelectedHubCategory}
+            onSelect={(cat) => {
+              setSelectedHubCategory(cat);
+              if (cat !== null) setUnidentifiedSelected(false);
+            }}
+            unidentifiedCount={unidentifiedCount}
+            isUnidentifiedSelected={unidentifiedSelected}
+            onSelectUnidentified={() => {
+              // Toggle: clicking the same chip again clears the filter.
+              setUnidentifiedSelected((cur) => !cur);
+              setSelectedHubCategory(null);
+            }}
           />
         ) : (
           <TypeChips counts={typeCounts} selected={selectedType} onSelect={setSelectedType} />
