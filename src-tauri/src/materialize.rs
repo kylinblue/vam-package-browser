@@ -125,7 +125,7 @@ pub fn load(conn: &mut Connection, target_seeds: &SeedSpec) -> Result<LoadResult
                  VALUES (?1, ?2, ?3)",
             )?;
             for id in &to_add {
-                match link_one(&addon_root, &source_paths, *id) {
+                match link_one(&addon_root, &managed_root, &source_paths, *id) {
                     Ok(dest_str) => {
                         ins.execute(params![*id, dest_str, now])?;
                         added += 1;
@@ -278,7 +278,7 @@ pub fn verify_active_folder(conn: &Connection) -> Result<VerifyResult> {
             continue;
         }
         let _ = managed_root; // bound for debug logging in a future iteration
-        if same_inode(active, &source).unwrap_or(false) {
+        if same_identity(active, &source).unwrap_or(false) {
             result.ok += 1;
         } else {
             result.inode_mismatch.push(id);
@@ -329,29 +329,41 @@ fn read_active_state(conn: &Connection) -> Result<HashMap<i64, String>> {
     Ok(rows)
 }
 
-fn read_var_paths(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>> {
+/// (var_path, is_directory_package) tuple per id. Drives the link_one
+/// branch between hardlink (file) and junction (directory).
+struct SourceInfo {
+    var_path: String,
+    is_directory_package: bool,
+}
+
+fn read_var_paths(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, SourceInfo>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    // Single-statement bound-param loop. ids are i64 (no escaping) and
-    // counts are typically small (hundreds to low thousands), so a
-    // prepared statement reused across iterations is the cheapest path
-    // and dodges SQLite's 999-bound-param cap.
     let mut out = HashMap::with_capacity(ids.len());
-    let mut stmt = conn.prepare("SELECT var_path FROM packages WHERE id = ?1")?;
+    let mut stmt = conn
+        .prepare("SELECT var_path, is_directory_package FROM packages WHERE id = ?1")?;
     for &id in ids {
-        let p: String = stmt.query_row(params![id], |r| r.get(0))?;
-        out.insert(id, p);
+        let row: (String, i64) =
+            stmt.query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        out.insert(
+            id,
+            SourceInfo {
+                var_path: row.0,
+                is_directory_package: row.1 != 0,
+            },
+        );
     }
     Ok(out)
 }
 
 fn link_one(
     addon_root: &Path,
-    source_paths: &HashMap<i64, String>,
+    managed_root: &Path,
+    source_paths: &HashMap<i64, SourceInfo>,
     id: i64,
 ) -> std::result::Result<String, LoadError> {
-    let source_str = match source_paths.get(&id) {
+    let info = match source_paths.get(&id) {
         Some(s) => s,
         None => {
             return Err(LoadError {
@@ -361,24 +373,28 @@ fn link_one(
             });
         }
     };
-    let source = PathBuf::from(source_str);
-    let basename = match source.file_name() {
-        Some(b) => b.to_owned(),
-        None => {
-            return Err(LoadError {
-                package_id: id,
-                path: source_str.clone(),
-                reason: "source var_path has no basename".into(),
-            });
-        }
-    };
-    let dest = addon_root.join(&basename);
+    let source = PathBuf::from(&info.var_path);
 
-    // Belt-and-suspenders: dest must be inside addon_root. Canonicalize
-    // both sides to defeat symlink/junction confusion. addon_root is
-    // pre-canonicalized via fsutil but the join could still escape via
-    // a `..` in the basename (it can't — file_name strips that — but
-    // codify the invariant anyway).
+    // Subfolder-preserving destination. Compute the relative path of the
+    // source under managed_root, then mirror it under addon_root.
+    // Falls back to bare basename if (somehow) the var_path isn't under
+    // managed_root — defensive, normally unreachable post-setup.
+    let relative = relative_under(&source, managed_root).unwrap_or_else(|| {
+        source
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_default()
+    });
+    if relative.as_os_str().is_empty() {
+        return Err(LoadError {
+            package_id: id,
+            path: info.var_path.clone(),
+            reason: "could not derive relative path under managed_root".into(),
+        });
+    }
+    let dest = addon_root.join(&relative);
+
+    // Belt-and-suspenders: dest must be inside addon_root.
     let dest_norm = normalize(&dest);
     let addon_norm = normalize(addon_root);
     if !dest_norm.starts_with(&addon_norm) {
@@ -399,15 +415,92 @@ fn link_one(
         });
     }
 
-    if let Err(e) = std::fs::hard_link(&source, &dest) {
+    // Create the parent directory tree under addon_root if missing.
+    // Mirrors the subfolder layout of managed_root for this entry.
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return Err(LoadError {
+                package_id: id,
+                path: dest.to_string_lossy().to_string(),
+                reason: format!("create_dir_all({}): {e}", parent.display()),
+            });
+        }
+    }
+
+    // Materialize: hardlink for file packages, NTFS junction for
+    // directory packages (NTFS doesn't allow hardlinks on dirs).
+    let materialized = if info.is_directory_package {
+        make_junction(&source, &dest)
+    } else {
+        std::fs::hard_link(&source, &dest).map_err(|e| anyhow!("{e}"))
+    };
+    if let Err(e) = materialized {
         return Err(LoadError {
             package_id: id,
             path: dest.to_string_lossy().to_string(),
-            reason: format!("hard_link failed: {e}"),
+            reason: if info.is_directory_package {
+                format!("junction failed: {e}")
+            } else {
+                format!("hard_link failed: {e}")
+            },
         });
     }
 
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// Create an NTFS directory junction at `dest` pointing at `target`.
+/// Same-volume only; no admin / Dev-Mode required (junctions don't
+/// count as symlinks for the SE_CREATE_SYMBOLIC_LINK_NAME privilege).
+///
+/// Implementation: shell out to `cmd /c mklink /J`. The Win32 way is
+/// `DeviceIoControl(FSCTL_SET_REPARSE_POINT)` with a hand-built
+/// REPARSE_DATA_BUFFER — about 30 lines of unsafe FFI we can do
+/// later if the shell-out becomes a hot path. Junction creation is
+/// once-per-package-load, so the process spawn isn't load-critical.
+fn make_junction(target: &Path, dest: &Path) -> Result<()> {
+    use std::process::Command;
+
+    // `mklink /J <link> <target>` creates the link (dest, must not exist)
+    // pointing at target. cmd /c is required since mklink is an internal
+    // cmd command, not a standalone executable.
+    let output = Command::new("cmd")
+        .args(&[
+            "/c",
+            "mklink",
+            "/J",
+            &dest.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| anyhow!("spawn mklink: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "mklink /J failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Strip a `parent` prefix from `child` case-insensitively, returning the
+/// child's original-case suffix as a PathBuf. None when child doesn't sit
+/// under parent.
+fn relative_under(child: &Path, parent: &Path) -> Option<PathBuf> {
+    let child_norm_lower = normalize(child);
+    let mut parent_norm_lower = normalize(parent);
+    if !parent_norm_lower.ends_with('\\') {
+        parent_norm_lower.push('\\');
+    }
+    if !child_norm_lower.starts_with(&parent_norm_lower) {
+        return None;
+    }
+    // Slice on the original-case (slash-normalized) child at the
+    // byte-length of the lowercased prefix. Safe for ASCII path prefixes.
+    let child_norm_orig = child.to_string_lossy().replace('/', "\\");
+    Some(PathBuf::from(&child_norm_orig[parent_norm_lower.len()..]))
 }
 
 fn unlink_one(addon_root: &Path, active_path: &Path) -> Result<()> {
@@ -420,14 +513,35 @@ fn unlink_one(addon_root: &Path, active_path: &Path) -> Result<()> {
             active_path.display()
         ));
     }
-    match std::fs::remove_file(active_path) {
-        Ok(()) => Ok(()),
+    // Detect what we placed: file vs. directory junction. On Windows,
+    // `symlink_metadata().file_type()` for a junction reports
+    // `is_symlink_dir() = true` (NOT `is_dir()` — that's set only for
+    // non-reparse directories). `remove_dir` removes the junction
+    // reparse point without touching the target; `remove_file` removes
+    // a regular file. Idempotent on NotFound either way.
+    #[cfg(target_os = "windows")]
+    use std::os::windows::fs::FileTypeExt;
+    let md = match std::fs::symlink_metadata(active_path) {
+        Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Idempotent: ledger had the row but the file was already
-            // gone. Treat as success so the row gets cleared.
-            Ok(())
+            return Ok(());
         }
-        Err(e) => Err(anyhow!("remove_file: {e}")),
+        Err(e) => return Err(anyhow!("symlink_metadata: {e}")),
+    };
+    let ft = md.file_type();
+    #[cfg(target_os = "windows")]
+    let dir_like = ft.is_dir() || ft.is_symlink_dir();
+    #[cfg(not(target_os = "windows"))]
+    let dir_like = ft.is_dir();
+    let result = if dir_like {
+        std::fs::remove_dir(active_path)
+    } else {
+        std::fs::remove_file(active_path)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow!("remove: {e}")),
     }
 }
 
@@ -438,15 +552,14 @@ fn normalize(p: &Path) -> String {
     p.to_string_lossy().replace('/', "\\").to_lowercase()
 }
 
-/// Cheap "are these the same NTFS file" check via metadata length.
-/// Same caveat as setup::same_inode — len equality is not airtight but
-/// is a strong signal in practice given how we got here (a hardlink
-/// preserves len, and an "unrelated file with the same name" would
-/// require the user to manually engineer it).
-fn same_inode(a: &Path, b: &Path) -> Result<bool> {
-    let ma = std::fs::metadata(a)?;
-    let mb = std::fs::metadata(b)?;
-    Ok(ma.len() == mb.len())
+/// Real NTFS identity check via `GetFileInformationByHandle`. Two paths
+/// share the same underlying file (or directory) iff their volume serial
+/// + nFileIndex pair match. Used by `verify_active_folder` to confirm a
+/// hardlink still points at its managed-side source.
+fn same_identity(a: &Path, b: &Path) -> Result<bool> {
+    let (va, ia) = fsutil::file_identity(a)?;
+    let (vb, ib) = fsutil::file_identity(b)?;
+    Ok(va == vb && ia == ib)
 }
 
 fn unix_now() -> i64 {
@@ -477,12 +590,13 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE packages (
-                id           INTEGER PRIMARY KEY,
-                var_path     TEXT NOT NULL DEFAULT '',
-                creator      TEXT NOT NULL DEFAULT '',
-                package_name TEXT NOT NULL DEFAULT '',
-                version      TEXT NOT NULL DEFAULT '1',
-                is_hidden    INTEGER NOT NULL DEFAULT 0
+                id                   INTEGER PRIMARY KEY,
+                var_path             TEXT NOT NULL DEFAULT '',
+                creator              TEXT NOT NULL DEFAULT '',
+                package_name         TEXT NOT NULL DEFAULT '',
+                version              TEXT NOT NULL DEFAULT '1',
+                is_hidden            INTEGER NOT NULL DEFAULT 0,
+                is_directory_package INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE package_dep_links (
                 src_package_id INTEGER NOT NULL,
@@ -818,6 +932,96 @@ mod tests {
         assert_eq!(plan.will_add, 0);
         assert_eq!(plan.will_remove, 2);
         assert_eq!(plan.will_keep, 0);
+    }
+
+    /// Drop a fake .var directory in `managed`, register a matching DB
+    /// row with is_directory_package=1.
+    fn add_pkg_dir(
+        managed: &Path,
+        conn: &Connection,
+        id: i64,
+        creator: &str,
+        name: &str,
+    ) {
+        let basename = format!("{creator}.{name}.1.var");
+        let dir = managed.join(&basename);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), b"{\"creatorName\":\"x\"}").unwrap();
+        std::fs::write(dir.join("payload.bin"), b"directory payload").unwrap();
+        conn.execute(
+            "INSERT INTO packages (id, var_path, creator, package_name, is_directory_package)
+             VALUES (?1, ?2, ?3, ?4, 1)",
+            params![id, dir.to_string_lossy(), creator, name],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn load_creates_junction_for_directory_package() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_pkg_dir(&managed, &conn, 1, "DirAuthor", "Pkg");
+
+        let res = load(
+            &mut conn,
+            &SeedSpec {
+                creators: vec!["DirAuthor".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(res.added, 1, "errors: {:?}", res.errors);
+        assert_eq!(res.errors.len(), 0);
+
+        let active = addon.join("DirAuthor.Pkg.1.var");
+        // Junction reports as symlink_dir via symlink_metadata (NOT plain
+        // is_dir — junctions have FILE_ATTRIBUTE_REPARSE_POINT set on top
+        // of FILE_ATTRIBUTE_DIRECTORY). Following the junction via
+        // regular `metadata()` reports the target's plain dir type.
+        use std::os::windows::fs::FileTypeExt;
+        let md = std::fs::symlink_metadata(&active).unwrap();
+        assert!(md.file_type().is_symlink_dir());
+        assert!(active.is_dir(), "should resolve to a directory via the junction");
+        // Contents accessible through the junction.
+        assert!(active.join("meta.json").exists());
+        assert!(active.join("payload.bin").exists());
+
+        // Unload: junction removed, original untouched.
+        let res = unload_all(&mut conn).unwrap();
+        assert_eq!(res.removed, 1);
+        assert!(!active.exists());
+        assert!(managed.join("DirAuthor.Pkg.1.var").join("meta.json").exists());
+    }
+
+    #[test]
+    fn load_preserves_subfolder_structure() {
+        let (_w, addon, managed, mut conn) = fixture();
+        // Create a managed-side file inside a nested subfolder; load
+        // should mirror that path under addon_root.
+        let sub = managed.join("AuthorX").join("Group");
+        std::fs::create_dir_all(&sub).unwrap();
+        let p = sub.join("AuthorX.Foo.1.var");
+        std::fs::write(&p, b"foo").unwrap();
+        conn.execute(
+            "INSERT INTO packages (id, var_path, creator, package_name)
+             VALUES (1, ?1, 'AuthorX', 'Foo')",
+            params![p.to_string_lossy()],
+        )
+        .unwrap();
+
+        let res = load(
+            &mut conn,
+            &SeedSpec {
+                creators: vec!["AuthorX".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(res.added, 1, "errors: {:?}", res.errors);
+        let expected = addon
+            .join("AuthorX")
+            .join("Group")
+            .join("AuthorX.Foo.1.var");
+        assert!(expected.exists());
     }
 
     #[test]

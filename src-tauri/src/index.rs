@@ -106,7 +106,27 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v20_to_v21(&conn)?;
         conn.pragma_update(None, "user_version", 21)?;
     }
+    if current < 22 {
+        migrate_v21_to_v22(&conn)?;
+        conn.pragma_update(None, "user_version", 22)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {
+    // VaM accepts BOTH .var ZIP files AND .var-named directories as
+    // packages (e.g. an unpacked archive sitting at AddonPackages/
+    // Author.Foo.1.var/ with a real meta.json inside). The scanner has
+    // always filtered to is_file(), so directory-form packages were
+    // entirely invisible to this tool — never indexed, never moved by
+    // the setup migration, never managed by load/unload.
+    //
+    // This flag tells the materialization layer how to project a
+    // package into the active folder. Files use std::fs::hard_link;
+    // directories use NTFS junctions (mklink /J) since NTFS doesn't
+    // support hardlinks on directories.
+    add_column_if_absent(conn, "is_directory_package", "INTEGER NOT NULL DEFAULT 0")?;
+    Ok(())
 }
 
 fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {

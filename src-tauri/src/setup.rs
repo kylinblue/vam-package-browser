@@ -406,6 +406,55 @@ pub fn begin_migration(
         rows
     };
 
+    // Pre-flight: detect any pair of rows that would produce the SAME
+    // destination path under managed_root after relative-path mapping.
+    // Without this guard the second rename overwrites the first
+    // (`fs::rename` on Windows replaces existing files), the user loses
+    // data, and the DB update then collides on the var_path UNIQUE
+    // constraint. Fail the whole migration cleanly before any FS write.
+    {
+        use std::collections::HashMap;
+        let mut by_rel: HashMap<String, Vec<String>> = HashMap::new();
+        for (_, old_path_str) in &to_migrate {
+            let old_path = PathBuf::from(old_path_str);
+            let rel = relative_under_addon_root(&old_path, addon_root);
+            let rel_key = rel.to_string_lossy().to_lowercase();
+            by_rel.entry(rel_key).or_default().push(old_path_str.clone());
+        }
+        let collisions: Vec<(String, Vec<String>)> = by_rel
+            .into_iter()
+            .filter(|(_, paths)| paths.len() > 1)
+            .collect();
+        if !collisions.is_empty() {
+            let n = collisions.len();
+            let preview: Vec<String> = collisions
+                .iter()
+                .take(5)
+                .map(|(rel, paths)| {
+                    let extras: Vec<String> = paths.iter().take(3).cloned().collect();
+                    let more = if paths.len() > 3 {
+                        format!(" (+{} more)", paths.len() - 3)
+                    } else {
+                        String::new()
+                    };
+                    format!("  {rel}\n    {}{}", extras.join("\n    "), more)
+                })
+                .collect();
+            let more = if n > 5 {
+                format!("\n  …and {} more collisions", n - 5)
+            } else {
+                String::new()
+            };
+            return Err(anyhow!(
+                "{n} package(s) would collide on the same destination path in managed_root. \
+                 The migration is aborted; no files have been moved. Resolve by \
+                 renaming or removing duplicates from your library, then retry.\n\
+                 Colliding groups (first 5 shown):\n{}{more}",
+                preview.join("\n")
+            ));
+        }
+    }
+
     let total = to_migrate.len() as i64;
     let mut moved: i64 = 0;
     let batch_size: usize = 500;
@@ -418,28 +467,27 @@ pub fn begin_migration(
             )?;
             for (id, old_path_str) in chunk {
                 let old_path = PathBuf::from(old_path_str);
-                let basename = match old_path.file_name() {
-                    Some(b) => b.to_owned(),
-                    None => {
-                        errors.push(MigrationError {
-                            path: old_path_str.clone(),
-                            reason: "no basename".into(),
-                        });
-                        continue;
-                    }
-                };
-                let new_path = managed_root.join(&basename);
+                let rel = relative_under_addon_root(&old_path, addon_root);
+                if rel.as_os_str().is_empty() {
+                    errors.push(MigrationError {
+                        path: old_path_str.clone(),
+                        reason: "could not derive relative path under addon_root".into(),
+                    });
+                    continue;
+                }
+                let new_path = managed_root.join(&rel);
 
-                // Idempotent migration of one file. Three cases:
-                //   (a) file at old_path, none at new_path → rename + update
-                //   (b) file at new_path (possibly also at old) → update only
-                //       (assume previous run already moved it; if old also
-                //        present, that's a collision the user has to resolve)
-                //   (c) file at neither → DB row points at nothing; record
-                //       error but don't fail the whole migration
+                // Idempotent migration of one entry. Three cases:
+                //   (a) entry at old_path, none at new_path → rename + update
+                //   (b) entry at new_path (possibly also at old) → update only,
+                //       BUT only if the two paths refer to the SAME NTFS file
+                //       (same volume serial + same nFileIndex). If they're
+                //       distinct files, record a collision and skip (this is
+                //       belt-and-suspenders since the pre-flight should have
+                //       caught it).
+                //   (c) entry at neither → DB row points at nothing
                 let old_exists = old_path.exists();
                 let new_exists = new_path.exists();
-
                 let new_path_str = new_path.to_string_lossy().to_string();
 
                 if !old_exists && !new_exists {
@@ -449,7 +497,7 @@ pub fn begin_migration(
                     });
                     continue;
                 }
-                if old_exists && new_exists && !same_inode(&old_path, &new_path).unwrap_or(false) {
+                if old_exists && new_exists && !same_file(&old_path, &new_path).unwrap_or(false) {
                     errors.push(MigrationError {
                         path: old_path_str.clone(),
                         reason: format!(
@@ -461,6 +509,19 @@ pub fn begin_migration(
                     continue;
                 }
                 if old_exists && !new_exists {
+                    // Ensure the destination's parent directory tree exists.
+                    if let Some(parent) = new_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            errors.push(MigrationError {
+                                path: old_path_str.clone(),
+                                reason: format!(
+                                    "create_dir_all({}): {e}",
+                                    parent.display()
+                                ),
+                            });
+                            continue;
+                        }
+                    }
                     if let Err(e) = std::fs::rename(&old_path, &new_path) {
                         errors.push(MigrationError {
                             path: old_path_str.clone(),
@@ -550,39 +611,69 @@ fn is_nested(child: &Path, parent: &Path) -> bool {
     c.starts_with(&p_dir)
 }
 
-/// Cheap "is this the same NTFS file" check via metadata. We use it to
-/// distinguish "leftover from previous run" (same file, both paths point
-/// to the same inode because rename just renamed it) from "two different
-/// files happen to have the same name" (collision).
-///
-/// On NTFS, `fs::metadata` lets us read len + creation time; combined
-/// they're a strong-but-not-bulletproof signal. A full
-/// `GetFileInformationByHandle` + `nFileIndex` check would be airtight
-/// but needs `windows` crate plumbing we can defer. Len equality is
-/// enough for the migration's purposes: a `rename` preserves len; a
-/// "two distinct files with the same name" scenario is wildly unlikely
-/// post-empty-folder validation.
-fn same_inode(a: &Path, b: &Path) -> Result<bool> {
-    let ma = std::fs::metadata(a)?;
-    let mb = std::fs::metadata(b)?;
-    Ok(ma.len() == mb.len())
+/// Real NTFS file identity check. Two paths refer to the same underlying
+/// inode iff they share volume serial AND nFileIndex (the
+/// `GetFileInformationByHandle` triple). Replaces the previous
+/// length-equality heuristic which gave false positives whenever two
+/// distinct files happened to be the same size.
+fn same_file(a: &Path, b: &Path) -> Result<bool> {
+    let (va, ia) = fsutil::file_identity(a)?;
+    let (vb, ib) = fsutil::file_identity(b)?;
+    Ok(va == vb && ia == ib)
 }
 
+/// Compute the path of `child` relative to `addon_root` (case-insensitive
+/// prefix match, slash-normalized). Returns the suffix as a `PathBuf`
+/// using the child's original casing. Empty `PathBuf` when child equals
+/// addon_root (caller treats as "no relative path"); also empty if child
+/// is outside addon_root — falls back to the bare basename so the
+/// migration still has a target name to use.
+fn relative_under_addon_root(child: &Path, addon_root: &Path) -> PathBuf {
+    let norm_lower = |p: &Path| -> String {
+        p.to_string_lossy().replace('/', "\\").to_lowercase()
+    };
+    let child_norm_lower = norm_lower(child);
+    let mut root_norm_lower = norm_lower(addon_root);
+    if !root_norm_lower.ends_with('\\') {
+        root_norm_lower.push('\\');
+    }
+    if child_norm_lower.starts_with(&root_norm_lower) {
+        // Slice the child's original-case string at the byte length of
+        // the lowercased root_norm. Safe because the underlying paths
+        // are byte-equivalent in length under lowercase + slash normalize.
+        let child_norm_orig = child.to_string_lossy().replace('/', "\\");
+        let suffix = &child_norm_orig[root_norm_lower.len()..];
+        return PathBuf::from(suffix);
+    }
+    // Outside addon_root — degrade to bare basename so the rename still
+    // has something to land on under managed_root. This is the
+    // exotic-case fallback (DB row from a different scan location).
+    child
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// Walk addon_root recursively for `.var` files AND `.var` directories
+/// that the DB didn't know about (e.g. user-dropped Hub downloads between
+/// the last scan and the migration). Move each one into managed_root at
+/// its relative position, preserving subfolder structure. Returns the
+/// number moved. A re-scan afterward will index them at their new
+/// location.
 fn walk_and_move_leftovers(
     addon_root: &Path,
     managed_root: &Path,
     errors: &mut Vec<MigrationError>,
 ) -> Result<i64> {
+    use walkdir::WalkDir;
     let mut count: i64 = 0;
-    let read = match std::fs::read_dir(addon_root) {
-        Ok(r) => r,
-        Err(_) => return Ok(0),
-    };
-    for entry in read.flatten() {
+    let mut it = WalkDir::new(addon_root).into_iter();
+    while let Some(entry) = it.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
         let ext_ok = path
             .extension()
             .and_then(|s| s.to_str())
@@ -591,24 +682,57 @@ fn walk_and_move_leftovers(
         if !ext_ok {
             continue;
         }
-        let basename = match path.file_name() {
-            Some(b) => b.to_owned(),
-            None => continue,
-        };
-        let new_path = managed_root.join(&basename);
+        let ft = entry.file_type();
+        if !(ft.is_file() || ft.is_dir()) {
+            continue;
+        }
+        let rel = relative_under_addon_root(path, addon_root);
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let new_path = managed_root.join(&rel);
         if new_path.exists() {
-            // Already there (e.g. partial earlier migration). Leave the
-            // leftover where it is; it'll be reported as orphaned later.
+            // Already there (partial earlier migration or pre-existing).
+            // Don't clobber. Caller can sort it out via a follow-up scan.
+            if ft.is_dir() {
+                it.skip_current_dir();
+            }
             continue;
         }
-        if let Err(e) = std::fs::rename(&path, &new_path) {
-            errors.push(MigrationError {
-                path: path.to_string_lossy().to_string(),
-                reason: format!("leftover rename failed: {e}"),
-            });
-            continue;
+        if let Some(parent) = new_path.parent() {
+            if !parent.exists() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    errors.push(MigrationError {
+                        path: path.to_string_lossy().to_string(),
+                        reason: format!("create_dir_all({}): {e}", parent.display()),
+                    });
+                    if ft.is_dir() {
+                        it.skip_current_dir();
+                    }
+                    continue;
+                }
+            }
         }
-        count += 1;
+        match std::fs::rename(path, &new_path) {
+            Ok(()) => {
+                count += 1;
+                if ft.is_dir() {
+                    // After a successful directory rename, the iterator
+                    // would otherwise try to descend INTO it (which is now
+                    // moved). Skip what's no longer there.
+                    it.skip_current_dir();
+                }
+            }
+            Err(e) => {
+                errors.push(MigrationError {
+                    path: path.to_string_lossy().to_string(),
+                    reason: format!("leftover rename failed: {e}"),
+                });
+                if ft.is_dir() {
+                    it.skip_current_dir();
+                }
+            }
+        }
     }
     Ok(count)
 }
@@ -822,6 +946,120 @@ mod tests {
         assert!(!state.setup_complete);
         assert!(state.managed_root.is_none());
         assert!(!state.migration_in_progress);
+    }
+
+    /// Drop a fake .var directory (the unpacked-package case) at
+    /// `<addon>/<name>` and register a matching DB row.
+    fn add_var_dir(addon: &Path, conn: &Connection, name: &str) {
+        let dir = addon.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), b"{\"creatorName\":\"x\"}").unwrap();
+        conn.execute(
+            "INSERT INTO packages (var_path, creator, package_name)
+             VALUES (?1, ?2, ?3)",
+            params![dir.to_string_lossy(), "DirAuthor", "Pkg"],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_preserves_subfolder_structure() {
+        let (_w, addon, managed, mut conn) = fixture();
+        // Place files in nested subfolders within addon_root. The
+        // migration should mirror that structure under managed_root.
+        let sub_a = addon.join("AuthorA");
+        let sub_b = addon.join("AuthorB").join("Subgroup");
+        std::fs::create_dir_all(&sub_a).unwrap();
+        std::fs::create_dir_all(&sub_b).unwrap();
+        let p1 = sub_a.join("Author.Foo.1.var");
+        let p2 = sub_b.join("Author.Bar.1.var");
+        std::fs::write(&p1, b"foo").unwrap();
+        std::fs::write(&p2, b"bar").unwrap();
+        conn.execute(
+            "INSERT INTO packages (var_path, creator, package_name) VALUES (?1, 'A', 'Foo')",
+            params![p1.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO packages (var_path, creator, package_name) VALUES (?1, 'A', 'Bar')",
+            params![p2.to_string_lossy()],
+        )
+        .unwrap();
+
+        let res = begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 2);
+        assert_eq!(res.errors.len(), 0);
+
+        // Files at mirrored locations under managed_root.
+        assert!(managed.join("AuthorA").join("Author.Foo.1.var").exists());
+        assert!(managed
+            .join("AuthorB")
+            .join("Subgroup")
+            .join("Author.Bar.1.var")
+            .exists());
+        // Originals gone.
+        assert!(!p1.exists());
+        assert!(!p2.exists());
+    }
+
+    #[test]
+    fn migration_refuses_basename_collisions_across_subfolders() {
+        let (_w, addon, managed, mut conn) = fixture();
+        // Two files in different subfolders sharing a relative-path
+        // basename — the bug that crashed the migration before. With
+        // subfolder preservation they'd land at different paths under
+        // managed_root, so this case ACTUALLY no longer collides.
+        // Instead test the *real* collision: two files in the SAME
+        // subfolder (impossible on a real FS within one scan, but
+        // simulate via DB rows pointing at the same path on disk).
+        let dir = addon.join("Same");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Author.Foo.1.var");
+        std::fs::write(&p, b"foo").unwrap();
+        // Two DB rows pointing at the same file — same var_path would
+        // hit the UNIQUE constraint at insert time normally, but we
+        // bypass by inserting via the no-conflict-clause INSERT.
+        // Use distinct var_paths that resolve to the SAME relative
+        // (impossible in practice, but tests the precheck).
+        conn.execute(
+            "INSERT INTO packages (var_path, creator, package_name) VALUES (?1, 'A', 'P')",
+            params![p.to_string_lossy()],
+        )
+        .unwrap();
+        // Now simulate a casing variant that maps to the same lowercased
+        // relative key — the precheck should catch it.
+        let p_alt = dir.join("Author.Foo.1.VAR");
+        std::fs::write(&p_alt, b"alt").unwrap();
+        conn.execute(
+            "INSERT INTO packages (var_path, creator, package_name) VALUES (?1, 'A', 'P2')",
+            params![p_alt.to_string_lossy()],
+        )
+        .unwrap();
+
+        let err = begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.to_lowercase().contains("collide"),
+                "expected collision error, got: {msg}");
+        // Pre-flight bailed BEFORE any move — both files still in place.
+        assert!(p.exists());
+        assert!(p_alt.exists());
+        // Nothing under managed yet.
+        assert!(!managed.exists() || managed.read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn migration_moves_directory_packages() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_var_dir(&addon, &conn, "DirAuthor.Pkg.1.var");
+
+        let res = begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 1);
+        assert_eq!(res.errors.len(), 0);
+        // Directory moved with its contents.
+        let new_dir = managed.join("DirAuthor.Pkg.1.var");
+        assert!(new_dir.is_dir());
+        assert!(new_dir.join("meta.json").exists());
+        assert!(!addon.join("DirAuthor.Pkg.1.var").exists());
     }
 
     #[test]

@@ -99,6 +99,49 @@ pub fn volume_info(_path: &Path) -> Result<VolumeInfo> {
     ))
 }
 
+/// True NTFS file identity via `GetFileInformationByHandle`: returns
+/// (volume_serial, nFileIndexHigh:nFileIndexLow packed into u64). Two
+/// hardlinks to the same underlying file share both. Used by the setup
+/// migration's resume logic to confirm "the file at new_path is the SAME
+/// file we already moved from old_path", not a coincidentally-same-length
+/// distinct file.
+///
+/// Works for both regular files and directories — we pass
+/// `FILE_FLAG_BACKUP_SEMANTICS` so the open succeeds on a dir handle.
+#[cfg(target_os = "windows")]
+pub fn file_identity(path: &Path) -> Result<(u32, u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    // FILE_FLAG_BACKUP_SEMANTICS lets us open a directory with read access.
+    // Without it CreateFileW fails on a dir path.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .with_context(|| format!("open for identity: {}", path.display()))?;
+
+    let handle = HANDLE(file.as_raw_handle() as *mut _);
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(handle, &mut info)
+            .map_err(|e| anyhow!("GetFileInformationByHandle({}): {e}", path.display()))?;
+    }
+    let file_id = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+    Ok((info.dwVolumeSerialNumber, file_id))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn file_identity(_path: &Path) -> Result<(u32, u64)> {
+    Err(anyhow!("file_identity is Windows-only"))
+}
+
 /// True if `a` and `b` resolve to the same NTFS volume. Either side
 /// returning an error from `volume_info` propagates.
 pub fn same_volume(a: &Path, b: &Path) -> Result<bool> {
