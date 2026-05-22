@@ -61,8 +61,20 @@ export interface PackageRow {
   hub_license: string | null;
   hub_lastmod: number | null;
   hub_external_url: string | null;
-  /** "filename" | "fuzzy_title" | "manual" | null. */
+  /** "filename" | "fuzzy_title" | "manual" | "override" | "inherit" | null. */
   hub_match_method: string | null;
+  /** User-override lock flags (0/1). When 1, the corresponding field
+   *  resists auto-sync overwrites — sync writers honor these via CASE
+   *  expressions; the scanner does the same for package_type_manual. */
+  hub_category_manual: number;
+  hub_author_manual: number;
+  package_type_manual: number;
+  /** Pristine pre-override snapshots. Populated by set_* on first
+   *  override; restored by clear_override. NULL when never overridden
+   *  or after a restore. UI shows "X (was Y)" when both are present. */
+  hub_category_original: string | null;
+  hub_author_original: string | null;
+  package_type_original: string | null;
 }
 
 export type SortField =
@@ -548,4 +560,138 @@ export async function getPackageRelationships(
  *  every scan — surfacing it as a command for the dev/maintenance case. */
 export async function resolveDependencies(): Promise<void> {
   return invoke("resolve_dependencies");
+}
+
+// ─── Hub pin / category override ──────────────────────────────────────────
+
+/** Outcome of a single package's pin attempt. Backend returns one entry
+ *  per requested package id, even when most fail in the same way (e.g.
+ *  URL parse error — every id gets a UrlParseError result so the UI can
+ *  show a uniform per-row table). */
+export type PinStatus =
+  | "ok"
+  | "url_parse_error"
+  | "not_found"
+  | "probe_failed"
+  | "package_missing"
+  | "db_error";
+
+export interface PinResult {
+  package_id: number;
+  /** "manual" or "override" on success, null on any failure. */
+  method: "manual" | "override" | null;
+  status: PinStatus;
+  /** Short human-readable context for non-ok rows (e.g. error message
+   *  from the HEAD probe). Frontend may surface in the toast. */
+  detail: string | null;
+}
+
+export interface PinReport {
+  results: PinResult[];
+  /** Aggregate propagation counts across all per-package writes. */
+  siblings_updated: number;
+  authors_updated: number;
+  /** Convenience flag for the toast — true iff ≥1 row was pinned. */
+  any_succeeded: boolean;
+}
+
+/** Manually pin one or more local packages to a hub resource. Accepts any
+ *  of: full URL, /resources/<slug>.<id>/ path (with or without subpath /
+ *  query), bare `<slug>.<id>`, or bare numeric id.
+ *
+ *  Backend validates with a single HEAD probe (resource-level, not
+ *  per-package) before any DB write. On success each package gets
+ *  hub_resource_id + hub_url + hub_match_method ('manual' if no prior
+ *  match, 'override' otherwise), and `propagate_hub_match` fires from
+ *  that row. Other hub_* metadata is filled in by the next hub-sync. */
+export async function setHubPin(
+  packageIds: number[],
+  hubUrl: string,
+): Promise<PinReport> {
+  return invoke<PinReport>("set_hub_pin", { packageIds, hubUrl });
+}
+
+export interface CategoryReport {
+  /** Rows the caller explicitly selected that got their category set. */
+  directly_updated: number;
+  /** Sibling rows (same creator+package_name) updated via propagation —
+   *  unconditional propagation in this case, since the user explicitly
+   *  declared a category for the package family. */
+  siblings_updated: number;
+}
+
+/** Bulk-override hub_category for selected packages. Sets the
+ *  `hub_category_manual` flag so subsequent hub-syncs leave the override
+ *  alone. Does NOT touch hub_match_method — this isn't a re-pin. */
+export async function setHubCategory(
+  packageIds: number[],
+  category: string,
+): Promise<CategoryReport> {
+  return invoke<CategoryReport>("set_hub_category", { packageIds, category });
+}
+
+export interface AuthorReport {
+  /** Rows the caller explicitly selected. */
+  directly_updated: number;
+  /** Other rows by the same creator(s) reached via author-wide
+   *  propagation. Disjoint from `directly_updated`. */
+  authors_updated: number;
+}
+
+/** Bulk-override `hub_author` for selected packages AND every other
+ *  package by the same creator(s). Sets `hub_author_manual = 1` on every
+ *  touched row so subsequent hub-syncs leave the override alone — useful
+ *  when the hub's displayed author name differs from how the user wants
+ *  the creator identified. */
+export async function setHubAuthor(
+  packageIds: number[],
+  hubAuthor: string,
+): Promise<AuthorReport> {
+  return invoke<AuthorReport>("set_hub_author", { packageIds, hubAuthor });
+}
+
+export interface PackageTypeReport {
+  /** Rows the caller explicitly selected. */
+  directly_updated: number;
+  /** Sibling versions (same creator + package_name) that picked up the
+   *  override via propagation. Disjoint from `directly_updated`. */
+  siblings_updated: number;
+}
+
+/** Bulk-override the local heuristic `package_type` for selected
+ *  packages + their version-siblings. Sets `package_type_manual = 1`
+ *  so the scanner leaves the override alone on rescan. Useful when a
+ *  package's contentList spans categories and the scanner labels it
+ *  "Mixed" but the user knows it's effectively a Scene / Look / Plugin. */
+export async function setPackageType(
+  packageIds: number[],
+  packageType: PackageType,
+): Promise<PackageTypeReport> {
+  return invoke<PackageTypeReport>("set_package_type", {
+    packageIds,
+    packageType,
+  });
+}
+
+export type OverrideField = "category" | "author" | "type" | "pin";
+
+export interface ClearOverrideReport {
+  rows_updated: number;
+}
+
+/** Release a user-override. `field` selects which lock to clear:
+ *   - "category" → hub_category_manual = 0 (across version siblings).
+ *     Leaves hub_category value alone; next sync may overwrite.
+ *   - "author" → hub_author_manual = 0 (across every package by the
+ *     affected creator). Leaves hub_author value alone.
+ *   - "type" → package_type_manual = 0 (across version siblings).
+ *     Leaves package_type alone; next scan may reclassify.
+ *   - "pin" → full unpin on the selected rows only (does NOT cascade
+ *     to siblings — they may have independent pins). Preserves
+ *     hub_author / hub_category if their _manual flags are set. */
+export async function clearOverride(
+  packageIds: number[],
+  field: OverrideField,
+): Promise<ClearOverrideReport> {
+  return invoke<ClearOverrideReport>("clear_override", { packageIds, field });
 }

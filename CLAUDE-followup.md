@@ -50,27 +50,19 @@ locations, not VaM library paths.
 
 ---
 
-## 2. Migration v16 was claimed in this branch
+## 2. Migration v20 → v21 was claimed during merge with main
 
-**Gating milestone:** N/A (immediate concern for parallel sessions).
+**Gating milestone:** N/A (resolved; informational).
 
-CLAUDE.md notes:
+Originally this branch claimed v15 → v16 for the visibility tables.
+Main meanwhile shipped v15 → v16 for `predicted_hub_category` and
+v16 → v20 for the override system. On merge, the visibility migration
+was renumbered to **v20 → v21**. The tables themselves are unchanged
+— self-contained, no FK refs to other migrations' columns — so the
+schema converges regardless of order.
 
-> Only one session at a time may add a new schema migration (a new
-> `migrate_v<N>_to_v<N+1>` function in `src-tauri/src/index.rs`). Two
-> parallel migrations claiming the same `v<N>` slot can't be cleanly
-> merged. If you're planning one, say so before writing.
-
-This branch (`claude/mystifying-visvesvaraya-272c27`) now contains
-`migrate_v15_to_v16` adding the four visibility tables
-(`visibility_presets`, `visibility_preset_creators`,
-`visibility_preset_packages`, `active_folder_state`). If another
-parallel session is planning a v16 schema change, they need to bump
-to v17 and rebase.
-
-No CLAUDE.md edit needed — this is a coordination note. Once this
-branch merges to main, the slot is permanently consumed and the issue
-disappears.
+If another parallel session is planning a v21+ schema change, they
+need to bump and rebase. No CLAUDE.md edit needed.
 
 ---
 

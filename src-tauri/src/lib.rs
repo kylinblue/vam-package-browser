@@ -2,9 +2,11 @@ mod commands;
 pub mod deps;
 pub mod embedding;
 pub mod fsutil;
+pub mod holdout;
 mod hub;
 pub mod index;
 pub mod meta;
+pub mod propagation;
 mod scanner;
 pub mod setup;
 pub mod tagging;
@@ -158,6 +160,11 @@ pub fn run() {
             commands::hub_debug_dump,
             commands::hub_debug_search,
             commands::hub_debug_fetch,
+            commands::set_hub_pin,
+            commands::set_hub_category,
+            commands::set_hub_author,
+            commands::set_package_type,
+            commands::clear_override,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

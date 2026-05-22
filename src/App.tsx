@@ -5,7 +5,10 @@ import { DetailView } from "./components/DetailView";
 import { FacetPanel } from "./components/FacetPanel";
 import { HubSyncView } from "./components/HubSyncView";
 import { PackageGrid } from "./components/PackageGrid";
+import { SelectionActionBar } from "./components/SelectionActionBar";
 import { SetupWizard } from "./components/SetupWizard";
+import { StatsPanel } from "./components/StatsPanel";
+import { Toast, type ToastMessage } from "./components/Toast";
 import { TypeChips } from "./components/TypeChips";
 import {
   countPackages,
@@ -55,6 +58,17 @@ export default function App() {
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [includeHidden, setIncludeHidden] = useState(false);
   const [errorsOnly, setErrorsOnly] = useState(false);
+  // Show only packages where the user has set some kind of override —
+  // any of the *_manual flags set, OR a user-driven hub pin
+  // (hub_match_method ∈ 'manual','override'). Useful for auditing the
+  // set of packages you've manually classified. Client-side filter on
+  // visiblePackages; the underlying loaded set isn't changed.
+  const [overridesOnly, setOverridesOnly] = useState(false);
+  // Show only packages with NO hub linkage at all — neither an
+  // auto-match (hub_resource_id) nor a user-set category override.
+  // These are the rows that render "ghost" / dimmed in Fetched mode.
+  // Useful for finding candidates for manual classification.
+  const [unmatchedOnly, setUnmatchedOnly] = useState(false);
   const [tileSize, setTileSize] = useState<number>(() =>
     loadTileDim("tileSize", 200),
   );
@@ -74,6 +88,36 @@ export default function App() {
     }
     return localStorage.getItem("facetPanelOpen") === "1" ? "tagged" : "simple";
   });
+  const [statsPanelVisible, setStatsPanelVisible] = useState<boolean>(
+    () => localStorage.getItem("statsPanelVisible") === "1",
+  );
+
+  // ── Group select ──────────────────────────────────────────────────────────
+  // `selectionMode` flips primary-click behavior to "toggle select" instead
+  // of "open detail". Modifier-driven select (Ctrl / Shift) works in either
+  // mode. Selection survives mode toggling so the user can dip out, refine
+  // filters, then continue selecting.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Last id that received a non-shift click. Shift-range fills from anchor
+  // to the next target. Null when no anchor has been set yet (or it's been
+  // filtered out of the visible packages — see toggleSelect's degradation).
+  const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
+
+  // When the user exits select mode, drop everything that was selected.
+  // Keeping the selection around across mode toggles led to "ghost" state —
+  // unticking the toolbar checkbox should feel like a clean exit, not "we
+  // remember your 47 picks in case you come back". They can re-enter the
+  // mode and re-select if needed; the bar reappears as soon as they do.
+  useEffect(() => {
+    if (!selectionMode) {
+      setSelectedIds(new Set());
+      setSelectionAnchor(null);
+    }
+  }, [selectionMode]);
+
+  // App-level toast — see components/Toast.tsx for the why-not-local rationale.
+  const [toast, setToast] = useState<ToastMessage | null>(null);
 
   // Size + date range filter inputs are kept as raw strings; empty = no bound.
   const [minSizeMb, setMinSizeMb] = useState("");
@@ -129,6 +173,10 @@ export default function App() {
     localStorage.setItem("viewMode", viewMode);
   }, [viewMode]);
 
+  useEffect(() => {
+    localStorage.setItem("statsPanelVisible", statsPanelVisible ? "1" : "0");
+  }, [statsPanelVisible]);
+
   // Re-snap tileSize when the viewport changes (e.g. window resize). Keeps
   // the column count stable in spirit — picks the nearest perfect-fit size
   // for the new width.
@@ -141,6 +189,40 @@ export default function App() {
 
   const debouncedSearch = useDebounced(search, 80);
 
+  // Signature of every filter that the StatsPanel does NOT manage. Any
+  // change here resets the panel's navigation history — its breadcrumb of
+  // clicked filters only makes sense within a stable surrounding context.
+  // (Panel-managed axes: selectedType, selectedCreator, selectedHubCategory.)
+  const externalFilterSignature = useMemo(
+    () =>
+      JSON.stringify({
+        search: debouncedSearch,
+        tags: selectedTags,
+        min: minSizeMb,
+        max: maxSizeMb,
+        minD: minDate,
+        maxD: maxDate,
+        fav: favoritesOnly,
+        hidden: includeHidden,
+        noThumb: missingPreview,
+        err: errorsOnly,
+        view: viewMode,
+      }),
+    [
+      debouncedSearch,
+      selectedTags,
+      minSizeMb,
+      maxSizeMb,
+      minDate,
+      maxDate,
+      favoritesOnly,
+      includeHidden,
+      missingPreview,
+      errorsOnly,
+      viewMode,
+    ],
+  );
+
   // Client-side filter for the locally-mutated flags (errorsOnly is purely
   // client-side; the others mirror the backend filter so optimistic toggles
   // on individual tiles update the view instantly).
@@ -149,9 +231,121 @@ export default function App() {
     return packages.filter((p) => {
       if (!includeHidden && p.is_hidden) return false;
       if (favoritesOnly && !p.is_favorite) return false;
+      if (overridesOnly) {
+        const hasOverride =
+          p.hub_category_manual === 1 ||
+          p.hub_author_manual === 1 ||
+          p.package_type_manual === 1 ||
+          p.hub_match_method === "manual" ||
+          p.hub_match_method === "override";
+        if (!hasOverride) return false;
+      }
+      if (unmatchedOnly) {
+        // Mirrors PackageGrid's isHubGhost predicate: no resource link
+        // AND no user-set category. A package with just an override
+        // hub_category counts as "touched" and is excluded.
+        if (p.hub_resource_id != null || p.hub_category) return false;
+      }
       return true;
     });
-  }, [packages, errorsOnly, includeHidden, favoritesOnly]);
+  }, [
+    packages,
+    errorsOnly,
+    includeHidden,
+    favoritesOnly,
+    overridesOnly,
+    unmatchedOnly,
+  ]);
+
+  // Count of distinct filter axes currently set away from default. Drives
+  // the toolbar's Clear-filters button (label + disabled state). Excludes
+  // sort fields and `includeHidden` — sort is a view choice, not a filter,
+  // and `includeHidden=true` is permissive (a reset to `false` would be a
+  // surprising tightening). All the rest are "narrows the visible set"
+  // toggles or selectors.
+  const activeFilterCount = useMemo(() => {
+    let n = 0;
+    if (debouncedSearch) n++;
+    if (selectedType !== null) n++;
+    if (selectedCreator !== "") n++;
+    if (selectedHubCategory !== null) n++;
+    if (selectedTags.length > 0) n++;
+    if (favoritesOnly) n++;
+    if (overridesOnly) n++;
+    if (unmatchedOnly) n++;
+    if (missingPreview) n++;
+    if (errorsOnly) n++;
+    if (minSizeMb !== "" || maxSizeMb !== "") n++;
+    if (minDate !== "" || maxDate !== "") n++;
+    return n;
+  }, [
+    debouncedSearch,
+    selectedType,
+    selectedCreator,
+    selectedHubCategory,
+    selectedTags,
+    favoritesOnly,
+    overridesOnly,
+    unmatchedOnly,
+    missingPreview,
+    errorsOnly,
+    minSizeMb,
+    maxSizeMb,
+    minDate,
+    maxDate,
+  ]);
+  const hasActiveFilters = activeFilterCount > 0;
+
+  const clearAllFilters = useCallback(() => {
+    setSearch("");
+    setSelectedType(null);
+    setSelectedCreator("");
+    setSelectedHubCategory(null);
+    setSelectedTags([]);
+    setFavoritesOnly(false);
+    setOverridesOnly(false);
+    setUnmatchedOnly(false);
+    setMissingPreview(false);
+    setErrorsOnly(false);
+    setMinSizeMb("");
+    setMaxSizeMb("");
+    setMinDate("");
+    setMaxDate("");
+  }, []);
+
+  // Tile click → selection mutator. Behavior:
+  //   range=true (Shift)        — fill from selectionAnchor to id in the
+  //                                current visiblePackages order. If the
+  //                                anchor isn't in the view (e.g. filter
+  //                                changed since), degrade to a plain
+  //                                toggle on `id`.
+  //   additive=false            — replace prior selection with just `id`.
+  //   default                   — toggle `id` on/off; keep other selections.
+  // Only non-range clicks update the anchor.
+  const toggleSelect = useCallback(
+    (id: number, additive: boolean, range: boolean) => {
+      setSelectedIds((prev) => {
+        if (range && selectionAnchor !== null) {
+          const ids = visiblePackages.map((p) => p.id);
+          const a = ids.indexOf(selectionAnchor);
+          const b = ids.indexOf(id);
+          if (a >= 0 && b >= 0) {
+            const [lo, hi] = a < b ? [a, b] : [b, a];
+            const next = new Set(additive ? prev : []);
+            for (let i = lo; i <= hi; i++) next.add(ids[i]);
+            return next;
+          }
+          // Anchor scrolled out of view — fall through to plain toggle.
+        }
+        const next = new Set(additive ? prev : []);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      if (!range) setSelectionAnchor(id);
+    },
+    [visiblePackages, selectionAnchor],
+  );
 
   const loadResults = useCallback(async () => {
     setLoading(true);
@@ -242,6 +436,21 @@ export default function App() {
       /* pre-scan: settings may not be set */
     }
   }, []);
+
+  // Single entry point children call after every action attempt. App
+  // shows the toast and — on success — kicks off a fresh grid query +
+  // aggregate refresh so any chip counts and tile data update live. No
+  // child needs to know about loadResults / aggregate refresh anymore.
+  const handleActionResult = useCallback(
+    (msg: ToastMessage) => {
+      setToast(msg);
+      if (msg.kind === "ok") {
+        loadResults();
+        refreshTypeCountsAndCreators();
+      }
+    },
+    [loadResults, refreshTypeCountsAndCreators],
+  );
 
   // Bootstrap.
   useEffect(() => {
@@ -466,7 +675,30 @@ export default function App() {
             placeholder="Filter by creator or package name…"
             style={{ flex: "0 1 280px" }}
           />
-          <label className="toolbar-toggle" style={{ marginLeft: "auto" }}>
+          <label
+            className="toolbar-toggle"
+            style={{ marginLeft: "auto" }}
+            title="Show only packages with no hub linkage at all — no auto-match, no manual pin, no category override. These are the rows that render dimmed (ghost) in Fetched mode."
+          >
+            <input
+              type="checkbox"
+              checked={unmatchedOnly}
+              onChange={(e) => setUnmatchedOnly(e.target.checked)}
+            />
+            <span>👻 Unmatched only</span>
+          </label>
+          <label
+            className="toolbar-toggle"
+            title="Show only packages with a user override (category / author / type / pin)"
+          >
+            <input
+              type="checkbox"
+              checked={overridesOnly}
+              onChange={(e) => setOverridesOnly(e.target.checked)}
+            />
+            <span>🔒 Overrides only</span>
+          </label>
+          <label className="toolbar-toggle">
             <input
               type="checkbox"
               checked={favoritesOnly}
@@ -498,6 +730,39 @@ export default function App() {
             />
             <span>errors only</span>
           </label>
+          <label className="toolbar-toggle">
+            <input
+              type="checkbox"
+              checked={statsPanelVisible}
+              onChange={(e) => setStatsPanelVisible(e.target.checked)}
+            />
+            <span>📊 Stats</span>
+          </label>
+          <button
+            type="button"
+            className="toolbar-clear-filters"
+            onClick={clearAllFilters}
+            disabled={!hasActiveFilters}
+            title={
+              hasActiveFilters
+                ? `Clear ${activeFilterCount} active filter${activeFilterCount === 1 ? "" : "s"}`
+                : "No active filters"
+            }
+          >
+            Clear filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </button>
+          <button
+            type="button"
+            className="toolbar-clear-filters"
+            onClick={() => {
+              loadResults();
+              refreshTypeCountsAndCreators();
+            }}
+            disabled={loading}
+            title="Re-query the grid + chip aggregates. The grid auto-refreshes after every override action; this is a safety net if you ever see stale data."
+          >
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
 
           <label className="toolbar-sort">
             <span>Sort</span>
@@ -653,7 +918,25 @@ export default function App() {
           onFilterByAuthor={setSelectedCreator}
           onFilterByType={(t) => setSelectedType(t as PackageType)}
           onViewportWidth={setViewportWidth}
+          selectionMode={selectionMode}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
         />
+        {statsPanelVisible && (
+          <StatsPanel
+            packages={visiblePackages}
+            totalMatched={totalMatched}
+            truncated={totalMatched > visiblePackages.length}
+            viewMode={viewMode}
+            selectedType={selectedType}
+            selectedCreator={selectedCreator}
+            selectedHubCategory={selectedHubCategory}
+            setSelectedType={setSelectedType}
+            setSelectedCreator={setSelectedCreator}
+            setSelectedHubCategory={setSelectedHubCategory}
+            externalFilterSignature={externalFilterSignature}
+          />
+        )}
       </div>
 
       {detailPackageId !== null && (
@@ -670,9 +953,28 @@ export default function App() {
             setSelectedType(t as PackageType);
             setDetailPackageId(null);
           }}
+          onFilterByHubCategory={(c) => {
+            setSelectedHubCategory(c);
+            setDetailPackageId(null);
+          }}
           onOpenPackage={setDetailPackageId}
+          onActionResult={handleActionResult}
         />
       )}
+
+      <SelectionActionBar
+        selection={[...selectedIds]}
+        viewMode={viewMode}
+        selectionMode={selectionMode}
+        onSelectionModeChange={setSelectionMode}
+        onClear={() => {
+          setSelectedIds(new Set());
+          setSelectionAnchor(null);
+        }}
+        onActionResult={handleActionResult}
+      />
+
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
 
       <div className="statusbar">
         <span>{headerCount}</span>
