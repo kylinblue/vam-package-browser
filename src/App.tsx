@@ -56,6 +56,12 @@ export default function App() {
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [includeHidden, setIncludeHidden] = useState(false);
   const [errorsOnly, setErrorsOnly] = useState(false);
+  // Show only packages where the user has set some kind of override —
+  // any of the *_manual flags set, OR a user-driven hub pin
+  // (hub_match_method ∈ 'manual','override'). Useful for auditing the
+  // set of packages you've manually classified. Client-side filter on
+  // visiblePackages; the underlying loaded set isn't changed.
+  const [overridesOnly, setOverridesOnly] = useState(false);
   const [tileSize, setTileSize] = useState<number>(() =>
     loadTileDim("tileSize", 200),
   );
@@ -211,9 +217,18 @@ export default function App() {
     return packages.filter((p) => {
       if (!includeHidden && p.is_hidden) return false;
       if (favoritesOnly && !p.is_favorite) return false;
+      if (overridesOnly) {
+        const hasOverride =
+          p.hub_category_manual === 1 ||
+          p.hub_author_manual === 1 ||
+          p.package_type_manual === 1 ||
+          p.hub_match_method === "manual" ||
+          p.hub_match_method === "override";
+        if (!hasOverride) return false;
+      }
       return true;
     });
-  }, [packages, errorsOnly, includeHidden, favoritesOnly]);
+  }, [packages, errorsOnly, includeHidden, favoritesOnly, overridesOnly]);
 
   // Count of distinct filter axes currently set away from default. Drives
   // the toolbar's Clear-filters button (label + disabled state). Excludes
@@ -229,6 +244,7 @@ export default function App() {
     if (selectedHubCategory !== null) n++;
     if (selectedTags.length > 0) n++;
     if (favoritesOnly) n++;
+    if (overridesOnly) n++;
     if (missingPreview) n++;
     if (errorsOnly) n++;
     if (minSizeMb !== "" || maxSizeMb !== "") n++;
@@ -241,6 +257,7 @@ export default function App() {
     selectedHubCategory,
     selectedTags,
     favoritesOnly,
+    overridesOnly,
     missingPreview,
     errorsOnly,
     minSizeMb,
@@ -257,6 +274,7 @@ export default function App() {
     setSelectedHubCategory(null);
     setSelectedTags([]);
     setFavoritesOnly(false);
+    setOverridesOnly(false);
     setMissingPreview(false);
     setErrorsOnly(false);
     setMinSizeMb("");
@@ -599,7 +617,19 @@ export default function App() {
             placeholder="Filter by creator or package name…"
             style={{ flex: "0 1 280px" }}
           />
-          <label className="toolbar-toggle" style={{ marginLeft: "auto" }}>
+          <label
+            className="toolbar-toggle"
+            style={{ marginLeft: "auto" }}
+            title="Show only packages with a user override (category / author / type / pin)"
+          >
+            <input
+              type="checkbox"
+              checked={overridesOnly}
+              onChange={(e) => setOverridesOnly(e.target.checked)}
+            />
+            <span>🔒 Overrides only</span>
+          </label>
+          <label className="toolbar-toggle">
             <input
               type="checkbox"
               checked={favoritesOnly}
