@@ -1822,6 +1822,33 @@ html, body, #root {
   color: var(--fg);
   border-color: var(--accent);
 }
+
+/* Restore / Unpin actions sit alongside the override buttons. Muted by
+   default so they don't compete visually with the primary actions — they
+   only matter to a user who already overrode something. */
+.detail-action-restore {
+  color: var(--fg-dim);
+  font-size: 11px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.detail-action-restore:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Subtle marker next to overridden fields (package_type chip etc). */
+.override-lock {
+  font-size: 10px;
+  opacity: 0.75;
+  margin-left: 2px;
+  cursor: help;
+}
+
+.hub-tier-locked {
+  border-color: var(--accent);
+  color: var(--fg);
+}
 .detail-action-primary:disabled {
   opacity: 0.5;
   cursor: default;

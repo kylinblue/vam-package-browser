@@ -61,8 +61,14 @@ export interface PackageRow {
   hub_license: string | null;
   hub_lastmod: number | null;
   hub_external_url: string | null;
-  /** "filename" | "fuzzy_title" | "manual" | null. */
+  /** "filename" | "fuzzy_title" | "manual" | "override" | "inherit" | null. */
   hub_match_method: string | null;
+  /** User-override lock flags (0/1). When 1, the corresponding field
+   *  resists auto-sync overwrites — sync writers honor these via CASE
+   *  expressions; the scanner does the same for package_type_manual. */
+  hub_category_manual: number;
+  hub_author_manual: number;
+  package_type_manual: number;
 }
 
 export type SortField =
@@ -573,4 +579,27 @@ export async function setPackageType(
     packageIds,
     packageType,
   });
+}
+
+export type OverrideField = "category" | "author" | "type" | "pin";
+
+export interface ClearOverrideReport {
+  rows_updated: number;
+}
+
+/** Release a user-override. `field` selects which lock to clear:
+ *   - "category" → hub_category_manual = 0 (across version siblings).
+ *     Leaves hub_category value alone; next sync may overwrite.
+ *   - "author" → hub_author_manual = 0 (across every package by the
+ *     affected creator). Leaves hub_author value alone.
+ *   - "type" → package_type_manual = 0 (across version siblings).
+ *     Leaves package_type alone; next scan may reclassify.
+ *   - "pin" → full unpin on the selected rows only (does NOT cascade
+ *     to siblings — they may have independent pins). Preserves
+ *     hub_author / hub_category if their _manual flags are set. */
+export async function clearOverride(
+  packageIds: number[],
+  field: OverrideField,
+): Promise<ClearOverrideReport> {
+  return invoke<ClearOverrideReport>("clear_override", { packageIds, field });
 }

@@ -157,6 +157,7 @@ pub fn run() {
             commands::set_hub_category,
             commands::set_hub_author,
             commands::set_package_type,
+            commands::clear_override,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

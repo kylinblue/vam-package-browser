@@ -84,6 +84,12 @@ pub struct PackageRow {
     pub hub_lastmod: Option<i64>,
     pub hub_external_url: Option<String>,
     pub hub_match_method: Option<String>,
+    /// User-override lock flags (0/1) from v16/v17/v18. Surface in the
+    /// frontend so the UI can show indicators next to overridden fields
+    /// and offer per-field "restore" actions.
+    pub hub_category_manual: i64,
+    pub hub_author_manual: i64,
+    pub package_type_manual: i64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -173,6 +179,7 @@ pub fn query_packages(
                 error, package_mtime,
                 hub_billing_tier, hub_is_hub_hosted, hub_license,
                 hub_lastmod, hub_external_url, hub_match_method,
+                hub_category_manual, hub_author_manual, package_type_manual,
                 {TAGS_SUBQUERY} AS tags
          FROM packages
          {where_clause}
@@ -231,7 +238,10 @@ pub fn query_packages(
                 hub_lastmod: row.get(36)?,
                 hub_external_url: row.get(37)?,
                 hub_match_method: row.get(38)?,
-                tags: split_tags(row.get::<_, Option<String>>(39)?),
+                hub_category_manual: row.get(39)?,
+                hub_author_manual: row.get(40)?,
+                package_type_manual: row.get(41)?,
+                tags: split_tags(row.get::<_, Option<String>>(42)?),
             })
         })
         .map_err(map_err)?
@@ -2085,6 +2095,7 @@ pub fn get_package_detail(
                     error, package_mtime, preview_path,
                     hub_billing_tier, hub_is_hub_hosted, hub_license,
                     hub_lastmod, hub_external_url, hub_match_method,
+                    hub_category_manual, hub_author_manual, package_type_manual,
                     {TAGS_SUBQUERY} AS tags
              FROM packages WHERE id = ?1",
         );
@@ -2132,7 +2143,10 @@ pub fn get_package_detail(
                 hub_lastmod: r.get(37)?,
                 hub_external_url: r.get(38)?,
                 hub_match_method: r.get(39)?,
-                tags: split_tags(r.get::<_, Option<String>>(40)?),
+                hub_category_manual: r.get(40)?,
+                hub_author_manual: r.get(41)?,
+                package_type_manual: r.get(42)?,
+                tags: split_tags(r.get::<_, Option<String>>(43)?),
             };
             let preview: Option<String> = r.get(33)?;
             Ok((row, preview))
@@ -2899,6 +2913,7 @@ pub fn get_packages_by_ids(
                 error, package_mtime,
                 hub_billing_tier, hub_is_hub_hosted, hub_license,
                 hub_lastmod, hub_external_url, hub_match_method,
+                hub_category_manual, hub_author_manual, package_type_manual,
                 {TAGS_SUBQUERY} AS tags
          FROM packages WHERE id IN ({ids_csv})"
     );
@@ -2945,7 +2960,10 @@ pub fn get_packages_by_ids(
                 hub_lastmod: row.get(36)?,
                 hub_external_url: row.get(37)?,
                 hub_match_method: row.get(38)?,
-                tags: split_tags(row.get::<_, Option<String>>(39)?),
+                hub_category_manual: row.get(39)?,
+                hub_author_manual: row.get(40)?,
+                package_type_manual: row.get(41)?,
+                tags: split_tags(row.get::<_, Option<String>>(42)?),
             })
         })
         .map_err(map_err)?
@@ -3522,6 +3540,104 @@ pub async fn set_package_type(
             } else {
                 eprintln!("set_package_type: id {package_id} not found");
             }
+        }
+
+        tx.commit().map_err(|e| format!("tx commit: {e}"))?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ClearOverrideReport {
+    /// Total rows touched (source + any propagated siblings/author-mates).
+    pub rows_updated: i64,
+}
+
+/// Clear a specific user-override on selected packages (+ their natural
+/// propagation scope). The `field` selects which override to release:
+///
+///   - "category" — sets hub_category_manual = 0 on the selected rows AND
+///     their version siblings (same creator + package_name). Leaves the
+///     hub_category VALUE alone; the next hub-sync may overwrite it.
+///   - "author"   — sets hub_author_manual = 0 across every package by
+///     the affected creator(s). Leaves the hub_author VALUE alone.
+///   - "type"     — sets package_type_manual = 0 across the selected rows
+///     and their version siblings. Leaves package_type alone; the next
+///     scan may reclassify.
+///   - "pin"      — full unpin on the selected rows ONLY (does NOT cascade
+///     to siblings — those may have their own independent pins). Clears
+///     hub_resource_id / hub_url / hub_title / hub_preview_url / billing /
+///     hub_is_hub_hosted / hub_license / hub_lastmod / hub_external_url /
+///     hub_match_method / hub_sync_state. Preserves hub_author and
+///     hub_category if their respective _manual flags are set (those
+///     locks are independent of the resource linkage).
+#[tauri::command]
+pub async fn clear_override(
+    state: State<'_, AppState>,
+    package_ids: Vec<i64>,
+    field: String,
+) -> Result<ClearOverrideReport, String> {
+    if package_ids.is_empty() {
+        return Err("no package ids supplied".to_string());
+    }
+    let db = state.db.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<ClearOverrideReport, String> {
+        let mut conn = db.lock();
+        let tx = conn.transaction().map_err(|e| format!("tx open: {e}"))?;
+        let mut report = ClearOverrideReport::default();
+        let now = unix_now();
+
+        for &package_id in &package_ids {
+            let n = match field.as_str() {
+                "category" => tx.execute(
+                    "UPDATE packages SET hub_category_manual = 0
+                     WHERE id = ?1
+                       OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
+                       AND package_name = (SELECT package_name FROM packages WHERE id = ?1))",
+                    params![package_id],
+                ),
+                "author" => tx.execute(
+                    "UPDATE packages SET hub_author_manual = 0
+                     WHERE creator = (SELECT creator FROM packages WHERE id = ?1)",
+                    params![package_id],
+                ),
+                "type" => tx.execute(
+                    "UPDATE packages SET package_type_manual = 0
+                     WHERE id = ?1
+                       OR (creator      = (SELECT creator      FROM packages WHERE id = ?1)
+                       AND package_name = (SELECT package_name FROM packages WHERE id = ?1))",
+                    params![package_id],
+                ),
+                "pin" => tx.execute(
+                    "UPDATE packages SET
+                        hub_resource_id  = NULL,
+                        hub_url          = NULL,
+                        hub_title        = NULL,
+                        hub_author       = CASE WHEN hub_author_manual   = 1 THEN hub_author   ELSE NULL END,
+                        hub_category     = CASE WHEN hub_category_manual = 1 THEN hub_category ELSE NULL END,
+                        hub_preview_url  = NULL,
+                        hub_billing_tier = NULL,
+                        hub_is_hub_hosted = NULL,
+                        hub_license      = NULL,
+                        hub_lastmod      = NULL,
+                        hub_external_url = NULL,
+                        hub_match_method = NULL,
+                        hub_sync_state   = NULL,
+                        hub_synced_at    = ?2
+                     WHERE id = ?1",
+                    params![package_id, now],
+                ),
+                other => {
+                    return Err(format!(
+                        "clear_override: unknown field '{other}' (expected category|author|type|pin)"
+                    ));
+                }
+            };
+            let n = n.map_err(|e| format!("clear_override {field} id {package_id}: {e}"))?;
+            report.rows_updated += n as i64;
         }
 
         tx.commit().map_err(|e| format!("tx commit: {e}"))?;

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  clearOverride,
   getPackageDetail,
   getPackageRelationships,
   HUGE_IMAGE_BYTES,
@@ -15,6 +16,7 @@ import {
   vamHubAuthorSearchUrl,
   vamHubPackageSearchUrl,
   type ImageEntry,
+  type OverrideField,
   type PackageDetail,
   type PackageRelationships,
   type PackageRow,
@@ -247,6 +249,15 @@ export function DetailView({
                 >
                   {pkg.package_type}
                 </button>
+                {pkg.package_type_manual === 1 && (
+                  <span
+                    className="override-lock"
+                    title="Type is locked by user override — scanner won't reclassify on rescan. Use Restore in the detail panel to release."
+                    aria-label="Locked override"
+                  >
+                    🔒
+                  </span>
+                )}
                 <span>· {formatSize(pkg.file_size)}</span>
                 <span title="When this .var was last touched on disk">
                   · file {formatDate(pkg.file_mtime)}
@@ -578,6 +589,35 @@ function HubInfoSection({
     }
   }
 
+  // Generic clear-override helper used by all three ↺ buttons + the
+  // Unpin button. Toast wording adapts to which field was cleared.
+  async function handleClearOverride(field: OverrideField) {
+    if (busy) return;
+    try {
+      const report = await clearOverride([pkg.id], field);
+      const n = report.rows_updated;
+      const label =
+        field === "category"
+          ? "Category override cleared"
+          : field === "author"
+            ? "Author override cleared"
+            : field === "type"
+              ? "Type override cleared"
+              : "Unpinned";
+      const msg =
+        n > 1
+          ? `${label} (${n} rows touched). Auto-sync may now update this field.`
+          : `${label}. Auto-sync may now update this field.`;
+      onActionResult({ kind: "ok", text: msg });
+      onReload();
+    } catch (e) {
+      onActionResult({
+        kind: "error",
+        text: `Clear ${field} failed: ${e}`,
+      });
+    }
+  }
+
   return (
     <section className="detail-hub-info">
       <h4>{isFetched ? "Hub" : "Overrides"}</h4>
@@ -594,7 +634,17 @@ function HubInfoSection({
                 {tierLabel}
               </span>
               {pkg.hub_category && (
-                <span className="hub-tier-badge hub-tier-category">
+                <span
+                  className={`hub-tier-badge hub-tier-category ${
+                    pkg.hub_category_manual === 1 ? "hub-tier-locked" : ""
+                  }`}
+                  title={
+                    pkg.hub_category_manual === 1
+                      ? "Category is locked by user override — auto-sync won't change it."
+                      : undefined
+                  }
+                >
+                  {pkg.hub_category_manual === 1 ? "🔒 " : ""}
                   {pkg.hub_category}
                 </span>
               )}
@@ -641,17 +691,35 @@ function HubInfoSection({
           </button>
         )}
         {isFetched && (
-          <button
-            type="button"
-            className="detail-action"
-            onClick={() => {
-              setShowPin((v) => !v);
-              setShowClassify(false);
-              setShowAuthor(false);
-            }}
-          >
-            {isMatched ? "Pin to different URL…" : "Pin to hub URL…"}
-          </button>
+          <>
+            <button
+              type="button"
+              className="detail-action"
+              onClick={() => {
+                setShowPin((v) => !v);
+                setShowClassify(false);
+                setShowAuthor(false);
+              }}
+            >
+              {isMatched ? "Pin to different URL…" : "Pin to hub URL…"}
+            </button>
+            {/* Unpin shows only when this row's link came from a user pin —
+                auto-matches don't need a UI unpin (they get re-evaluated
+                by sync). For inherited rows the user can just re-pin
+                source instead. */}
+            {(pkg.hub_match_method === "manual" ||
+              pkg.hub_match_method === "override") && (
+              <button
+                type="button"
+                className="detail-action detail-action-restore"
+                onClick={() => handleClearOverride("pin")}
+                title="Unpin: clear this package's hub linkage. Preserves any locked category / author."
+                disabled={busy !== null}
+              >
+                ↺ Unpin
+              </button>
+            )}
+          </>
         )}
         <button
           type="button"
@@ -669,6 +737,24 @@ function HubInfoSection({
         >
           {classifyLabel}
         </button>
+        {((isFetched && pkg.hub_category_manual === 1) ||
+          (!isFetched && pkg.package_type_manual === 1)) && (
+          <button
+            type="button"
+            className="detail-action detail-action-restore"
+            onClick={() =>
+              handleClearOverride(isFetched ? "category" : "type")
+            }
+            title={
+              isFetched
+                ? "Release the category lock — auto-sync may overwrite hub_category on next pass."
+                : "Release the type lock — scanner may reclassify on next rescan."
+            }
+            disabled={busy !== null}
+          >
+            ↺ Restore
+          </button>
+        )}
         <button
           type="button"
           className="detail-action"
@@ -681,6 +767,17 @@ function HubInfoSection({
         >
           Override author…
         </button>
+        {pkg.hub_author_manual === 1 && (
+          <button
+            type="button"
+            className="detail-action detail-action-restore"
+            onClick={() => handleClearOverride("author")}
+            title="Release the author lock — auto-sync may overwrite hub_author on next pass for every package by this creator."
+            disabled={busy !== null}
+          >
+            ↺ Restore
+          </button>
+        )}
       </div>
 
       {showPin && (
