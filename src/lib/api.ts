@@ -374,6 +374,65 @@ export async function beginMigration(
   return invoke<MigrationResult>("begin_migration", { managedPath });
 }
 
+// --- Visibility-presets load / unload --------------------------------------
+
+/** What the user wants visible — author seeds + explicit package ids.
+ *  Authors resolve dynamically against `packages.creator` (case-
+ *  insensitive); explicit ids bypass the `is_hidden` filter. */
+export interface SeedSpec {
+  creators: string[];
+  package_ids: number[];
+}
+
+export interface LoadError {
+  package_id: number;
+  path: string;
+  reason: string;
+}
+
+export interface LoadResult {
+  /** Packages newly hardlinked into the active folder in this call. */
+  added: number;
+  /** Packages whose hardlink was removed from the active folder. */
+  removed: number;
+  /** Packages already correctly materialized — no FS touch.
+   *  `kept + added == |closure(seeds)|` on success. */
+  kept: number;
+  /** Per-package errors that didn't abort the sync (destination
+   *  occupied, source missing, etc.). */
+  errors: LoadError[];
+  elapsed_ms: number;
+}
+
+export interface VerifyResult {
+  total: number;
+  ok: number;
+  missing_in_active: number[];
+  inode_mismatch: number[];
+  missing_in_managed: number[];
+}
+
+/** Reconcile the active folder to be exactly closure(seeds). Adds
+ *  hardlinks for packages newly in target; removes hardlinks for
+ *  packages newly out. Idempotent — re-calling with the same seeds
+ *  is a no-op. */
+export async function loadVisibility(seeds: SeedSpec): Promise<LoadResult> {
+  return invoke<LoadResult>("load_visibility", { seeds });
+}
+
+/** Empty the active folder. Removes every hardlink we placed; unmanaged
+ *  files in the folder are left alone. */
+export async function unloadAll(): Promise<LoadResult> {
+  return invoke<LoadResult>("unload_all");
+}
+
+/** Read-only health check on `active_folder_state` vs the filesystem.
+ *  Reports stale rows. Caller decides whether to fix via `loadVisibility`
+ *  (which is self-healing on re-call). */
+export async function verifyActiveFolder(): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_active_folder");
+}
+
 export interface ThumbProgress {
   id: number;
   ok: boolean;

@@ -5,6 +5,7 @@ pub mod fsutil;
 pub mod holdout;
 mod hub;
 pub mod index;
+pub mod materialize;
 pub mod meta;
 pub mod propagation;
 mod scanner;
@@ -165,6 +166,9 @@ pub fn run() {
             commands::set_hub_author,
             commands::set_package_type,
             commands::clear_override,
+            commands::load_visibility,
+            commands::unload_all,
+            commands::verify_active_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -470,6 +470,55 @@ pub async fn begin_migration(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+// --- Visibility-presets load / unload --------------------------------------
+
+/// Reconcile the active folder to be exactly equal to closure(seeds).
+/// Hardlinks new packages in, removes ones that fell out of target,
+/// leaves matching ones alone. Per-package errors surface in
+/// `LoadResult.errors`; hard errors (setup incomplete, volume mismatch)
+/// bubble up as a string.
+#[tauri::command]
+pub async fn load_visibility(
+    state: State<'_, AppState>,
+    seeds: crate::visibility::SeedSpec,
+) -> Result<crate::materialize::LoadResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db.lock();
+        crate::materialize::load(&mut conn, &seeds)
+            .map_err(|e| format!("load failed: {e:#}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Empty the active folder. Removes every hardlink we placed; leaves
+/// any unmanaged files alone.
+#[tauri::command]
+pub async fn unload_all(
+    state: State<'_, AppState>,
+) -> Result<crate::materialize::LoadResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db.lock();
+        crate::materialize::unload_all(&mut conn)
+            .map_err(|e| format!("unload failed: {e:#}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Read-only health check: walks active_folder_state and reports which
+/// rows are still valid hardlinks vs. stale (missing in active /
+/// managed, or inode mismatch). Caller decides whether to fix.
+#[tauri::command]
+pub fn verify_active_folder(
+    state: State<'_, AppState>,
+) -> Result<crate::materialize::VerifyResult, String> {
+    let conn = state.db.lock();
+    crate::materialize::verify_active_folder(&conn).map_err(map_err)
+}
+
 #[tauri::command]
 pub fn set_favorite(
     state: State<'_, AppState>,
