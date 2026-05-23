@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import type { ToastMessage } from "./Toast";
 import {
   clearOverride,
   getPackageDetail,
@@ -71,7 +72,7 @@ interface Props {
   /** App-level action result sink. DetailView forwards every successful
    *  or failed override / pin / category / author write here; App shows
    *  the toast and (on success) refreshes the grid + aggregates. */
-  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
+  onActionResult: (msg: ToastMessage) => void;
 }
 
 function formatSize(bytes: number): string {
@@ -531,7 +532,7 @@ function HubInfoSection({
   pkg: PackageRow;
   viewMode: "simple" | "tagged" | "fetched";
   onReload: () => void;
-  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
+  onActionResult: (msg: ToastMessage) => void;
 }) {
   const isFetched = viewMode === "fetched";
   const isMatched = pkg.hub_resource_id != null;
@@ -602,7 +603,22 @@ function HubInfoSection({
       } else {
         msg += " Metadata fills in on the next hub sync.";
       }
-      onActionResult({ kind: "ok", text: msg });
+      const pkgId = pkg.id;
+      onActionResult({
+        kind: "ok",
+        text: msg,
+        revert: {
+          onRevert: async () => {
+            try {
+              await clearOverride([pkgId], "pin");
+              onActionResult({ kind: "ok", text: "Pin reverted." });
+              onReload();
+            } catch (re) {
+              onActionResult({ kind: "error", text: `Revert pin failed: ${re}` });
+            }
+          },
+        },
+      });
       setShowPin(false);
       setPinUrl("");
       onReload();
@@ -640,7 +656,24 @@ function HubInfoSection({
               } updated. Scanner will preserve this on rescan.`
             : `Set type to ${classifyDraft}. Scanner will preserve this on rescan.`;
       }
-      onActionResult({ kind: "ok", text: msg });
+      const pkgId = pkg.id;
+      const revertField: OverrideField = isFetched ? "category" : "type";
+      const revertLabel = isFetched ? "Category override reverted." : "Type override reverted.";
+      onActionResult({
+        kind: "ok",
+        text: msg,
+        revert: {
+          onRevert: async () => {
+            try {
+              await clearOverride([pkgId], revertField);
+              onActionResult({ kind: "ok", text: revertLabel });
+              onReload();
+            } catch (re) {
+              onActionResult({ kind: "error", text: `Revert failed: ${re}` });
+            }
+          },
+        },
+      });
       setShowClassify(false);
       onReload();
     } catch (e) {
@@ -665,7 +698,22 @@ function HubInfoSection({
               others === 1 ? "" : "s"
             } by ${pkg.creator || "this creator"} picked up the same override. Auto-sync will keep it.`
           : "Updated author. Auto-sync will keep this override.";
-      onActionResult({ kind: "ok", text: msg });
+      const pkgId = pkg.id;
+      onActionResult({
+        kind: "ok",
+        text: msg,
+        revert: {
+          onRevert: async () => {
+            try {
+              await clearOverride([pkgId], "author");
+              onActionResult({ kind: "ok", text: "Author override reverted." });
+              onReload();
+            } catch (re) {
+              onActionResult({ kind: "error", text: `Revert author failed: ${re}` });
+            }
+          },
+        },
+      });
       setShowAuthor(false);
       onReload();
     } catch (e) {

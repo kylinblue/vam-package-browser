@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ToastMessage } from "./Toast";
 import {
   clearOverride,
   setHubAuthor,
@@ -77,7 +78,7 @@ interface Props {
   /** App-level action result sink. Bar forwards every successful or
    *  failed write here; App shows the toast and (on success) refreshes
    *  the grid + aggregates. */
-  onActionResult: (msg: { kind: "ok" | "error"; text: string }) => void;
+  onActionResult: (msg: ToastMessage) => void;
   /** Optional handler for the visibility action. When undefined the
    *  button renders disabled with a tooltip pointing at the future
    *  visibility-preset feature. Wired in by a separate session — see
@@ -163,7 +164,21 @@ export function SelectionActionBar({
       } else {
         msg += " Metadata fills in on the next hub sync.";
       }
-      onActionResult({ kind: "ok", text: msg });
+      const revertIds = [...selection];
+      onActionResult({
+        kind: "ok",
+        text: msg,
+        revert: {
+          onRevert: async () => {
+            try {
+              await clearOverride(revertIds, "pin");
+              onActionResult({ kind: "ok", text: "Pin reverted." });
+            } catch (re) {
+              onActionResult({ kind: "error", text: `Revert pin failed: ${re}` });
+            }
+          },
+        },
+      });
       reset();
       onClear();
     } catch (e) {
@@ -211,7 +226,25 @@ export function SelectionActionBar({
                 direct === 1 ? "" : "s"
               }. Scanner will preserve this on rescan.`;
       }
-      onActionResult({ kind: "ok", text: msg });
+      const revertIds = [...selection];
+      const revertField: OverrideField = isFetched ? "category" : "type";
+      const revertLabel = isFetched
+        ? "Category override reverted."
+        : "Type override reverted.";
+      onActionResult({
+        kind: "ok",
+        text: msg,
+        revert: {
+          onRevert: async () => {
+            try {
+              await clearOverride(revertIds, revertField);
+              onActionResult({ kind: "ok", text: revertLabel });
+            } catch (re) {
+              onActionResult({ kind: "error", text: `Revert failed: ${re}` });
+            }
+          },
+        },
+      });
       reset();
       onClear();
     } catch (e) {
@@ -271,7 +304,21 @@ export function SelectionActionBar({
           : `Updated author for ${direct} package${
               direct === 1 ? "" : "s"
             }. Auto-sync will keep this override.`;
-      onActionResult({ kind: "ok", text: msg });
+      const revertIds = [...selection];
+      onActionResult({
+        kind: "ok",
+        text: msg,
+        revert: {
+          onRevert: async () => {
+            try {
+              await clearOverride(revertIds, "author");
+              onActionResult({ kind: "ok", text: "Author override reverted." });
+            } catch (re) {
+              onActionResult({ kind: "error", text: `Revert author failed: ${re}` });
+            }
+          },
+        },
+      });
       reset();
       onClear();
     } catch (e) {

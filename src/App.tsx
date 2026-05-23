@@ -10,7 +10,7 @@ import { LoadVisibilityModal } from "./components/LoadVisibilityModal";
 import { SelectionActionBar } from "./components/SelectionActionBar";
 import { SetupWizard } from "./components/SetupWizard";
 import { StatsPanel } from "./components/StatsPanel";
-import { Toast, type ToastMessage } from "./components/Toast";
+import { ToastStack, type ToastMessage } from "./components/Toast";
 import { TypeChips } from "./components/TypeChips";
 import {
   countPackages,
@@ -120,8 +120,16 @@ export default function App() {
     }
   }, [selectionMode]);
 
-  // App-level toast — see components/Toast.tsx for the why-not-local rationale.
-  const [toast, setToast] = useState<ToastMessage | null>(null);
+  // App-level toast stack — see components/Toast.tsx for the why-not-local
+  // rationale. Stack lets a fast user pile up multiple override actions
+  // and revert each independently; each toast carries its own 10s auto-
+  // dismiss. `toastSeqRef` is a monotonic counter for stable per-toast
+  // ids so dismissing toast #3 doesn't take down #4 by accident.
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const toastSeqRef = useRef<number>(0);
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   // Refresh button pulse on hub-sync-progress events. We restart the CSS
   // animation via classList reset + reflow rather than React state to
@@ -559,12 +567,15 @@ export default function App() {
   }, []);
 
   // Single entry point children call after every action attempt. App
-  // shows the toast and — on success — kicks off a fresh grid query +
-  // aggregate refresh so any chip counts and tile data update live. No
-  // child needs to know about loadResults / aggregate refresh anymore.
+  // pushes onto the toast stack and — on success — kicks off a fresh
+  // grid query + aggregate refresh so any chip counts and tile data
+  // update live. No child needs to know about loadResults / aggregate
+  // refresh anymore. Each toast gets a unique id so the user (or its
+  // own auto-dismiss timer) can dismiss it without disturbing siblings.
   const handleActionResult = useCallback(
     (msg: ToastMessage) => {
-      setToast(msg);
+      const id = ++toastSeqRef.current;
+      setToasts((prev) => [...prev, { ...msg, id }]);
       if (msg.kind === "ok") {
         loadResults();
         refreshTypeCountsAndCreators();
@@ -1181,7 +1192,7 @@ export default function App() {
         visibleCount={visiblePackages.length}
       />
 
-      <Toast toast={toast} onDismiss={() => setToast(null)} />
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       <div className="statusbar">
         <span>{headerCount}</span>

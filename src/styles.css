@@ -92,16 +92,25 @@ html, body, #root {
   100% { box-shadow: 0 0 0 0 rgba(74, 158, 255, 0);    border-color: var(--border); }
 }
 
-/* App-level toast — lives at the app root so it survives child
+/* App-level toast STACK — lives at the app root so it survives child
    component unmounts (DetailView blanking out during a refetch, etc).
    `bottom` clears the always-visible .selection-bar + .statusbar at the
-   foot of the layout so the toast can't sit on top of the Apply / Clear
-   buttons during its 6s auto-dismiss window (see Toast.tsx). */
-.toast {
+   foot of the layout so toasts can't sit on top of the Apply / Clear
+   buttons during their 10s auto-dismiss window (see Toast.tsx). Stack
+   grows upward (column-reverse) so the newest toast sits at the bottom
+   nearest the user's pointer and older ones drift up. */
+.toast-stack {
   position: fixed;
   bottom: 100px;
   right: 20px;
   z-index: 1000;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
   max-width: 480px;
   padding: 10px 12px;
   border-radius: 4px;
@@ -115,6 +124,24 @@ html, body, #root {
   gap: 8px;
   align-items: flex-start;
   animation: toast-in 180ms ease-out;
+}
+/* Revert button on override toasts. Subtle border + accent-on-hover
+   matches the toolbar/selection-bar button language so it reads as an
+   actionable affordance without shouting over the toast text. */
+.toast-revert {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  align-self: center;
+}
+.toast-revert:hover {
+  color: var(--fg);
+  border-color: var(--accent);
 }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(6px); }
