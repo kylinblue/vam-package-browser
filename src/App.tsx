@@ -157,6 +157,37 @@ export default function App() {
     };
   }, []);
 
+  // hub-preview-pulled: backend fires one of these per successfully
+  // downloaded + decoded hub icon, carrying the package_id. We patch
+  // the row's has_preview to true in place AND bump thumbVersions[id]
+  // so the WebView re-fetches the `thumb://<id>` URL. Together that
+  // makes the new thumbnail appear in the grid live, no Refresh
+  // click needed.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    (async () => {
+      const u = await listen<number>("hub-preview-pulled", (event) => {
+        if (cancelled) return;
+        const id = event.payload;
+        if (typeof id !== "number") return;
+        setPackages((prev) =>
+          prev.map((p) => (p.id === id ? { ...p, has_preview: true } : p)),
+        );
+        setThumbVersions((prev) => ({
+          ...prev,
+          [id]: (prev[id] ?? 0) + 1,
+        }));
+      });
+      if (cancelled) u();
+      else unlisten = u;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Size + date range filter inputs are kept as raw strings; empty = no bound.
   const [minSizeMb, setMinSizeMb] = useState("");
   const [maxSizeMb, setMaxSizeMb] = useState("");

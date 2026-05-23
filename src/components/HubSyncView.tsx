@@ -11,6 +11,7 @@ import {
   type HubSyncOptions,
   type HubSyncProgress,
   type HubSyncSummary,
+  type WorkerSlot,
 } from "../lib/api";
 
 const LOG_RING_SIZE = 300;
@@ -299,7 +300,7 @@ export function HubSyncView() {
         )}
       </button>
 
-      {isCollapsed ? null : (<>
+      {isCollapsed ? null : (<div className="hub-sync-body">
       <div className="hub-section">
         <h3>Catalog</h3>
         {statusErr && <div className="detail-error-inline">status: {statusErr}</div>}
@@ -375,73 +376,88 @@ export function HubSyncView() {
 
       <div className="hub-section">
         <h3>Run sync</h3>
-        <div className="hub-stat-row hub-controls">
-          <label className="hub-field">
-            <span>Creator filter</span>
-            <input
-              type="text"
-              value={creatorFilter}
-              onChange={(e) => setCreatorFilter(e.target.value)}
-              placeholder="(blank = all)"
-              disabled={running}
-            />
-          </label>
-          <label className="hub-field">
-            <span>Workers</span>
-            <input
-              type="number"
-              min={1}
-              max={8}
-              value={workers}
-              onChange={(e) => setWorkers(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
-              disabled={running}
-              style={{ width: 60 }}
-            />
-          </label>
-          <label className="hub-field">
-            <span>Rate limit (ms)</span>
-            <input
-              type="number"
-              min={100}
-              step={50}
-              value={rateLimitMs}
-              onChange={(e) => setRateLimitMs(Math.max(100, Number(e.target.value) || 700))}
-              disabled={running}
-              style={{ width: 90 }}
-            />
-          </label>
-          <label className="toolbar-toggle">
-            <input
-              type="checkbox"
-              checked={onlyMissing}
-              onChange={(e) => setOnlyMissing(e.target.checked)}
-              disabled={running}
-            />
-            <span>only_missing</span>
-          </label>
-          <label className="toolbar-toggle">
-            <input
-              type="checkbox"
-              checked={pullPreview}
-              onChange={(e) => setPullPreview(e.target.checked)}
-              disabled={running}
-            />
-            <span>pull preview thumbnails</span>
-          </label>
-          {!running ? (
-            <button type="button" onClick={onStartSync} className="hub-action hub-action-primary">
-              Start sync
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={onStopSync}
-              disabled={stopping}
-              className="hub-action hub-action-stop"
-            >
-              {stopping ? "Stopping…" : "Stop sync"}
-            </button>
-          )}
+        {/* 67/33 split: controls on the left, per-worker strip on the
+            right when a sync is in flight. Workers' bars are only as
+            many slots as the user configured (`workers` state). */}
+        <div className="hub-run-sync-split">
+          <div className="hub-stat-row hub-controls hub-run-sync-controls">
+            <label className="hub-field">
+              <span>Creator filter</span>
+              <input
+                type="text"
+                value={creatorFilter}
+                onChange={(e) => setCreatorFilter(e.target.value)}
+                placeholder="(blank = all)"
+                disabled={running}
+              />
+            </label>
+            <label className="hub-field">
+              <span>Workers</span>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={workers}
+                onChange={(e) => setWorkers(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+                disabled={running}
+                style={{ width: 60 }}
+              />
+            </label>
+            <label className="hub-field">
+              <span>Rate limit (ms)</span>
+              <input
+                type="number"
+                min={100}
+                step={50}
+                value={rateLimitMs}
+                onChange={(e) => setRateLimitMs(Math.max(100, Number(e.target.value) || 700))}
+                disabled={running}
+                style={{ width: 90 }}
+              />
+            </label>
+            <label className="toolbar-toggle">
+              <input
+                type="checkbox"
+                checked={onlyMissing}
+                onChange={(e) => setOnlyMissing(e.target.checked)}
+                disabled={running}
+              />
+              <span>only_missing</span>
+            </label>
+            <label className="toolbar-toggle">
+              <input
+                type="checkbox"
+                checked={pullPreview}
+                onChange={(e) => setPullPreview(e.target.checked)}
+                disabled={running}
+              />
+              <span>pull preview thumbnails</span>
+            </label>
+            {!running ? (
+              <button type="button" onClick={onStartSync} className="hub-action hub-action-primary">
+                Start sync
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onStopSync}
+                disabled={stopping}
+                className="hub-action hub-action-stop"
+              >
+                {stopping ? "Stopping…" : "Stop sync"}
+              </button>
+            )}
+          </div>
+
+          <div className="hub-run-sync-workers">
+            {running && progress && progress.workers && progress.workers.length > 0 ? (
+              progress.workers.map((w) => <WorkerSlotView key={w.slot} slot={w} />)
+            ) : (
+              <div className="hub-workers-idle">
+                {running ? "(workers booting…)" : "(start a sync to see per-worker status)"}
+              </div>
+            )}
+          </div>
         </div>
 
         {progress && (
@@ -462,7 +478,46 @@ export function HubSyncView() {
       </div>
 
       <LogPanel logs={logs} onCopy={copyLog} onClear={clearLog} />
-      </>)}
+      </div>)}
+    </div>
+  );
+}
+
+/// One row in the per-worker strip in the Run sync card. Shows the
+/// rayon slot id, the creator that worker is currently processing, its
+/// phase (pin / shortcut / fallback / idle), and a mini progress bar
+/// scoped to that creator's package count. Distinct from the global
+/// progress bar below — that one aggregates all workers; this one is
+/// honest about what THIS slot is doing right now.
+function WorkerSlotView({ slot }: { slot: WorkerSlot }) {
+  const pct = slot.total > 0 ? Math.min(100, (slot.done / slot.total) * 100) : 0;
+  const idle = slot.phase === "idle" || !slot.creator;
+  const phaseLabel = (() => {
+    switch (slot.phase) {
+      case "pin": return "B1";
+      case "shortcut": return "kw";
+      case "fallback": return "B2";
+      case "idle":
+      default: return "—";
+    }
+  })();
+  return (
+    <div className={`hub-worker-row ${idle ? "hub-worker-idle" : ""}`}>
+      <div className="hub-worker-head">
+        <span className="hub-worker-slot">W{slot.slot}</span>
+        <span className="hub-worker-creator" title={slot.creator || "(idle)"}>
+          {slot.creator || "(idle)"}
+        </span>
+        <span className="hub-worker-phase">{phaseLabel}</span>
+        {!idle && (
+          <span className="hub-worker-count">
+            {slot.done}/{slot.total}
+          </span>
+        )}
+      </div>
+      <div className="hub-worker-bar">
+        <div className="hub-worker-bar-fill" style={{ width: `${pct}%` }} />
+      </div>
     </div>
   );
 }
@@ -551,7 +606,7 @@ function ProgressBlock({
     <div className="hub-progress">
       <div className="hub-progress-row">
         <span className="hub-progress-phase">
-          {running ? `phase: ${progress.current_status}` : "(completed)"}
+          {running ? "Progress" : "(completed)"}
         </span>
         <span className="hub-progress-count">
           {progress.done} / {progress.total}

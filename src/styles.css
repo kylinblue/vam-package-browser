@@ -886,6 +886,16 @@ html, body, #root {
 .detail-gallery-item.huge {
   background: linear-gradient(135deg, #1a2030, #131822);
 }
+
+/* Visual marker for the synthetic "package preview" gallery item so
+   it's distinguishable from in-package images at a glance. Thin
+   accent-blue ring even when unselected. */
+.detail-gallery-item-hub {
+  box-shadow: inset 0 0 0 1px rgba(74, 158, 255, 0.35);
+}
+.detail-gallery-item-hub.selected {
+  box-shadow: inset 0 0 0 1px rgba(74, 158, 255, 0.7);
+}
 .detail-gallery-huge {
   display: flex;
   flex-direction: column;
@@ -1360,6 +1370,22 @@ html, body, #root {
   margin-top: 4px;
 }
 
+/* Scrollable wrapper around the expanded sections so the panel doesn't
+   eat the whole viewport on shorter (16:10, laptops) screens. Collapse
+   handle stays outside this wrapper so the user can always reach it
+   without scrolling. Capped at 70vh — leaves ~30% of viewport for the
+   package grid below even when fully expanded. */
+.hub-sync-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 70vh;
+  overflow-y: auto;
+  /* Breathing room for the scrollbar track so .hub-section's right
+     border doesn't sit flush against it. */
+  padding-right: 4px;
+}
+
 .hub-section {
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -1445,6 +1471,101 @@ html, body, #root {
 
 .hub-controls {
   align-items: flex-end;
+}
+
+/* 67/33 split inside the Run sync card. Controls live on the left
+   (multi-line wrap is fine), per-worker status strip on the right.
+   When viewport is too narrow to comfortably show both, the strip
+   stacks under the controls — gracefully degrades on laptops. */
+.hub-run-sync-split {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.hub-run-sync-controls {
+  flex: 2 1 0;
+  /* Already a wrapping flex row from .hub-stat-row — we just constrain
+     it to the 2/3 column. */
+}
+.hub-run-sync-workers {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
+  /* Cap height so 10 workers don't push the global progress bar off
+     screen on 16:10. Each row is ~38px; 5 rows × 38px ≈ 190px, anything
+     above scrolls within the strip. */
+  max-height: 220px;
+  overflow-y: auto;
+}
+@media (max-width: 900px) {
+  .hub-run-sync-split { flex-direction: column; }
+  .hub-run-sync-workers {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding-left: 0;
+    padding-top: 10px;
+    max-height: none;
+  }
+}
+
+.hub-workers-idle {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+/* One worker row: header line (slot + creator + phase + count) on top,
+   mini progress bar below. */
+.hub-worker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.hub-worker-row.hub-worker-idle { opacity: 0.45; }
+.hub-worker-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.hub-worker-slot {
+  color: var(--fg-dim);
+  font-weight: 600;
+  min-width: 24px;
+}
+.hub-worker-creator {
+  flex: 1 1 auto;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-worker-phase {
+  color: var(--accent);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hub-worker-idle .hub-worker-phase { color: var(--fg-dim); }
+.hub-worker-count {
+  color: var(--fg-dim);
+}
+.hub-worker-bar {
+  height: 4px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.hub-worker-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms ease-out;
 }
 
 .hub-field {

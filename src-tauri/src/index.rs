@@ -110,7 +110,32 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         migrate_v21_to_v22(&conn)?;
         conn.pragma_update(None, "user_version", 22)?;
     }
+    if current < 23 {
+        migrate_v22_to_v23(&conn)?;
+        conn.pragma_update(None, "user_version", 23)?;
+    }
     Ok(conn)
+}
+
+fn migrate_v22_to_v23(conn: &Connection) -> Result<()> {
+    // Hub-canonical preview tracking. The scanner extracts a best-effort
+    // thumbnail from inside the .var (e.g. the JPG sibling of a scene's
+    // JSON), but the .var format doesn't designate a canonical preview —
+    // so what we store is a guess. The hub-side icon, by contrast, is
+    // the author's deliberate choice as the public face of the resource.
+    //
+    // Hub-pulled previews should therefore override scanner guesses. The
+    // old `has_preview` flag conflated both sources; this column tracks
+    // "we have the hub-canonical preview" separately so the backfill
+    // pass knows what's still to pull and doesn't re-fetch on every sync.
+    //
+    // NULL = never hub-pulled (initial state for every existing row —
+    // the sync layer had a bug that prevented any hub pulls; this
+    // matches truth on every install).
+    // Set to unix_now() on successful pull. To force-re-pull a row,
+    // null it out manually.
+    add_column_if_absent(conn, "hub_preview_pulled_at", "INTEGER")?;
+    Ok(())
 }
 
 fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {

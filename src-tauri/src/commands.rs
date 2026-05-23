@@ -773,6 +773,30 @@ pub struct HubSyncProgress {
     pub previews_pulled: usize,
     pub current: String,
     pub current_status: String, // "matched" | "not_found" | "failed" | "gate"
+    /// Per-worker snapshot (length == `workers` config). Each slot tracks
+    /// what its rayon thread is currently doing so the UI can render a
+    /// strip of per-worker progress bars alongside the global one. The
+    /// "phase" field is meaningful per-slot here (unlike the global
+    /// `current_status` which is misleading under parallel work — the
+    /// first worker to enter B2 globalized "fallback" even when others
+    /// were still in B1).
+    pub workers: Vec<WorkerSlot>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct WorkerSlot {
+    pub slot: usize,
+    /// Empty string when the slot is idle (no creator assigned).
+    pub creator: String,
+    /// One of "idle" | "pin" (B1 broad path) | "shortcut" (L≤2 path) |
+    /// "fallback" (B2 keyword retry).
+    pub phase: String,
+    /// Per-creator: number of locals from this creator that have
+    /// finished (matched or terminally not_found / failed).
+    pub done: usize,
+    /// Per-creator: total local packages for the creator currently
+    /// assigned to this slot.
+    pub total: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -861,7 +885,16 @@ struct LocalPkg {
     id: i64,
     creator: String,
     package_name: String,
+    /// Any thumbnail exists at `<thumbs_dir>/<id>.webp`. May be a scanner
+    /// guess (extracted from inside the .var) or a hub-canonical pull;
+    /// use `hub_preview_pulled_at` to distinguish.
     has_preview: bool,
+    /// Unix timestamp when the hub-canonical icon was successfully
+    /// downloaded for this row. `None` means we still have either no
+    /// thumbnail or the scanner's best-effort guess. The backfill /
+    /// inline pull paths gate on this — a successful pull overrides
+    /// the scanner guess and stamps this column.
+    hub_preview_pulled_at: Option<i64>,
 }
 
 /// Parse a .var filename `Creator.PackageName.Version.var` (with `Version`
@@ -1015,6 +1048,7 @@ fn slug_cache_extras_for_creator(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_one_creator(
     creator: &str,
     locals: &[LocalPkg],
@@ -1026,6 +1060,73 @@ fn sync_one_creator(
     rate_limit_ms: u64,
     pull_preview_for_no_thumb: bool,
     counters: &Arc<parking_lot::Mutex<SyncCounters>>,
+    worker_slots: &Arc<parking_lot::Mutex<Vec<WorkerSlot>>>,
+    preview_cache: &Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+) -> bool {
+    // Slot id: rayon's current_thread_index is stable inside our custom
+    // ThreadPool with `num_threads(workers)`, so 0..workers maps 1:1 to
+    // physical worker threads. Default to 0 outside any rayon context
+    // (shouldn't happen in production, but keep the code defensive).
+    let slot_id = rayon::current_thread_index().unwrap_or(0);
+    let initial_phase = if locals.len() <= L_BROADCAST_SHORTCUT {
+        "shortcut"
+    } else {
+        "pin"
+    };
+    {
+        let mut slots = worker_slots.lock();
+        if let Some(s) = slots.get_mut(slot_id) {
+            s.creator = creator.to_string();
+            s.phase = initial_phase.to_string();
+            s.done = 0;
+            s.total = locals.len();
+        }
+    }
+    // Always release the slot back to "idle" before returning so the UI
+    // reflects the right answer between creators. Wrap the body in a
+    // closure so the cleanup runs on every exit path.
+    let result = sync_one_creator_inner(
+        creator,
+        locals,
+        client,
+        db,
+        thumbs_dir,
+        app,
+        cancel,
+        rate_limit_ms,
+        pull_preview_for_no_thumb,
+        counters,
+        worker_slots,
+        slot_id,
+        preview_cache,
+    );
+    {
+        let mut slots = worker_slots.lock();
+        if let Some(s) = slots.get_mut(slot_id) {
+            s.creator = String::new();
+            s.phase = "idle".to_string();
+            s.done = 0;
+            s.total = 0;
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_one_creator_inner(
+    creator: &str,
+    locals: &[LocalPkg],
+    client: &hub::HubClient,
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    thumbs_dir: &std::path::Path,
+    app: &AppHandle,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    rate_limit_ms: u64,
+    pull_preview_for_no_thumb: bool,
+    counters: &Arc<parking_lot::Mutex<SyncCounters>>,
+    worker_slots: &Arc<parking_lot::Mutex<Vec<WorkerSlot>>>,
+    slot_id: usize,
+    preview_cache: &Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 ) -> bool {
     // L≤2 shortcut: skip the broad per-creator search and route every
     // local straight to the per-package keyword search. The targeted
@@ -1045,20 +1146,15 @@ fn sync_one_creator(
                 break;
             }
             let abort = retry_one_keyword(
-                local, client, db, app, cancel, rate_limit_ms, counters, &mut b2_cache,
+                local, client, db, app, cancel, rate_limit_ms, counters,
+                worker_slots, slot_id,
+                thumbs_dir, pull_preview_for_no_thumb,
+                &mut b2_cache, preview_cache,
             );
             if abort {
                 return true;
             }
         }
-        // Optional preview pull: still useful for small-L creators. Skipped
-        // here because retry_one_keyword's hits aren't retained — preview
-        // URLs require either holding onto them per local (more state) or
-        // re-fetching. For consistency with the deferred manual-paste UX,
-        // we defer preview pull entirely on shortcut path. Users who care
-        // can run a separate sync pass with the L>2 path via creator filter.
-        let _ = thumbs_dir;
-        let _ = pull_preview_for_no_thumb;
         return false;
     }
 
@@ -1091,7 +1187,7 @@ fn sync_one_creator(
                 c.failed += locals.len();
                 c.done += locals.len();
             }
-            emit_progress(app, counters, creator);
+            emit_progress(app, counters, worker_slots, creator);
             sleep_with_cancel(rate_limit_ms, cancel);
             return false;
         }
@@ -1316,6 +1412,9 @@ fn sync_one_creator(
         //     retry_one_keyword finishes, otherwise the progress bar maxes
         //     out at the end of B1 while B2 silently grinds.
         //   - SQL error is terminal → counters.failed++, done++
+        // Per-slot done is incremented INSIDE the match arms below
+        // (matched + error paths only — not_found defers to B2, mirroring
+        // the global `c.done` policy).
         match r {
             Ok(_) => {
                 let mut c = counters.lock();
@@ -1324,6 +1423,13 @@ fn sync_one_creator(
                         c.matched += 1;
                         c.done += 1;
                         drop(c);
+                        // Per-slot tick.
+                        {
+                            let mut slots = worker_slots.lock();
+                            if let Some(s) = slots.get_mut(slot_id) {
+                                s.done += 1;
+                            }
+                        }
                         // Propagate this freshly-matched row to its
                         // package-wide siblings + author-wide rows. The
                         // helper's strict guard skips already-confirmed
@@ -1350,19 +1456,27 @@ fn sync_one_creator(
                 let mut c = counters.lock();
                 c.failed += 1;
                 c.done += 1;
+                drop(c);
+                // Per-slot tick on terminal error.
+                let mut slots = worker_slots.lock();
+                if let Some(s) = slots.get_mut(slot_id) {
+                    s.done += 1;
+                }
             }
         }
-        emit_progress(app, counters, &format!("{}.{}", local.creator, local.package_name));
+        emit_progress(app, counters, worker_slots, &format!("{}.{}", local.creator, local.package_name));
     }
     if let Err(e) = tx.commit() {
         eprintln!("hub sync tx commit failed for creator {creator}: {e}");
     }
     drop(conn_for_writes);
 
-    // Optional preview pull pass for newly-matched packages that still have
-    // no local thumbnail. Done after the tx commits to avoid holding the
-    // write lock across HTTP. Each pull is rate-limited like any other hub
-    // request.
+    // Optional preview pull pass for newly-matched B1 packages that
+    // still have no local thumbnail. Done after the tx commits to
+    // avoid holding the write lock across HTTP. The `preview_cache` is
+    // sync-wide (passed in from start_hub_sync) so a URL pulled by the
+    // pre-B1 backfill phase or by another worker's per-creator loop
+    // is reused here for free.
     if pull_preview_for_no_thumb {
         for local in locals {
             if cancel.load(Ordering::Relaxed) {
@@ -1390,27 +1504,18 @@ fn sync_one_creator(
                         .and_then(|(_, hm, _)| hm.preview_url.clone())
                 });
             let Some(purl) = preview_url else { continue };
-            match client.download_bytes(&purl) {
-                Ok(bytes) => {
-                    let out = thumbnails::thumb_path(thumbs_dir, local.id);
-                    match thumbnails::generate_from_bytes(&bytes, &out) {
-                        Ok(()) => {
-                            counters.lock().previews_pulled += 1;
-                            let _ = db.lock().execute(
-                                "UPDATE packages SET has_preview = 1 WHERE id = ?1",
-                                params![local.id],
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("hub preview convert failed for {}: {e:#}", local.id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("hub preview download failed for {}: {e:#}", local.id);
-                }
-            }
-            sleep_with_cancel(rate_limit_ms, cancel);
+            pull_one_preview(
+                local,
+                &purl,
+                client,
+                db,
+                thumbs_dir,
+                counters,
+                rate_limit_ms,
+                cancel,
+                preview_cache,
+                app,
+            );
         }
     }
 
@@ -1433,6 +1538,14 @@ fn sync_one_creator(
             let mut c = counters.lock();
             c.phase = "fallback".to_string();
         }
+        // Per-slot phase: distinct from the global one (this one is honest
+        // about what THIS worker is doing right now).
+        {
+            let mut slots = worker_slots.lock();
+            if let Some(s) = slots.get_mut(slot_id) {
+                s.phase = "fallback".to_string();
+            }
+        }
         let mut b2_cache: std::collections::HashMap<(String, String), Vec<hub::HubMatch>> =
             std::collections::HashMap::new();
         for idx in unmatched_in_b1 {
@@ -1448,7 +1561,12 @@ fn sync_one_creator(
                 cancel,
                 rate_limit_ms,
                 counters,
+                worker_slots,
+                slot_id,
+                thumbs_dir,
+                pull_preview_for_no_thumb,
                 &mut b2_cache,
+                preview_cache,
             );
             if abort {
                 break;
@@ -1531,6 +1649,7 @@ fn longest_token(name: &str) -> Option<String> {
 /// package. Mirrors `sync_one_creator`'s match logic but on a per-package
 /// scale: fewer hub results, no creator-wide rebuild, just one local row to
 /// update. Returns `true` to signal global abort (e.g. gate hit).
+#[allow(clippy::too_many_arguments)]
 fn retry_one_keyword(
     local: &LocalPkg,
     client: &hub::HubClient,
@@ -1539,7 +1658,12 @@ fn retry_one_keyword(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     rate_limit_ms: u64,
     counters: &Arc<parking_lot::Mutex<SyncCounters>>,
+    worker_slots: &Arc<parking_lot::Mutex<Vec<WorkerSlot>>>,
+    slot_id: usize,
+    thumbs_dir: &std::path::Path,
+    pull_preview_for_no_thumb: bool,
     cache: &mut std::collections::HashMap<(String, String), Vec<hub::HubMatch>>,
+    preview_cache: &Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 ) -> bool {
     // XF tokenizes the keyword on `_` `-` `.` as word separators and AND's
     // the resulting tokens. So `damar_forest` becomes "damar" AND "forest",
@@ -1575,6 +1699,7 @@ fn retry_one_keyword(
             emit_progress(
                 app,
                 counters,
+                worker_slots,
                 &format!("{}.{}", local.creator, local.package_name),
             );
             return false;
@@ -1709,6 +1834,13 @@ fn retry_one_keyword(
         }
     };
 
+    // Capture the matched preview URL up-front so we can pull the
+    // thumbnail AFTER the DB lock is released (the pull's own brief
+    // db.lock() for has_preview=1 would deadlock if we held conn here).
+    let preview_url_for_pull: Option<String> =
+        hub_match.and_then(|hm| hm.preview_url.clone());
+    let mut db_update_ok = false;
+
     if hub_match.is_some() {
         let now = unix_now();
         let conn = db.lock();
@@ -1778,6 +1910,7 @@ fn retry_one_keyword(
                         local.id
                     );
                 }
+                db_update_ok = true;
             }
             Err(e) => {
                 eprintln!("hub sync B2 DB update failed for id {}: {e}", local.id);
@@ -1790,17 +1923,307 @@ fn retry_one_keyword(
         }
     }
 
+    // Preview pull for the freshly-matched B2 row (and by extension the
+    // L≤2 shortcut path, which funnels through here). Runs only after
+    // the DB lock above is dropped — pull_one_preview's own db.lock()
+    // for `has_preview = 1` would otherwise deadlock with `conn`.
+    // preview_cache is the per-creator dedup so this doesn't re-fetch
+    // when another version of the same family already pulled.
+    if pull_preview_for_no_thumb && db_update_ok {
+        if let Some(purl) = preview_url_for_pull.as_deref() {
+            pull_one_preview(
+                local,
+                purl,
+                client,
+                db,
+                thumbs_dir,
+                counters,
+                rate_limit_ms,
+                cancel,
+                preview_cache,
+                app,
+            );
+        }
+    }
+
     // B2 is the terminal step for any package that landed here. Whether
     // we matched, stayed not_found, or hit a DB error, this package is
     // now done as far as the sync is concerned — tick `done` once so the
     // progress bar reflects the truth across both phases.
     counters.lock().done += 1;
+    // Per-slot done: every retry_one_keyword call accounts for exactly
+    // one local on either the L≤2 shortcut path or B2 (after B1
+    // deferred its done++ for unmatched rows).
+    {
+        let mut slots = worker_slots.lock();
+        if let Some(s) = slots.get_mut(slot_id) {
+            s.done += 1;
+        }
+    }
     emit_progress(
         app,
         counters,
+        worker_slots,
         &format!("{}.{}", local.creator, local.package_name),
     );
     false
+}
+
+/// Download (or fetch-from-cache) a hub preview image, generate a .webp
+/// thumbnail at the per-package thumb path, and flip `has_preview = 1`.
+///
+/// Dedup story: `preview_cache` is a sync-wide URL → bytes map shared
+/// across the backfill pass, B1, B2, the L≤2 shortcut, AND across all
+/// parallel rayon workers. When multiple locals match the same hub
+/// resource (multi-version families, duplicate installs, pre-matched
+/// rows being backfilled at the same time as fresh matches happen for
+/// siblings) they all share one CDN fetch instead of N rate-limited
+/// fetches. Decode/encode still happens per-local because each
+/// `<package_id>.webp` file is the addressable artifact the grid
+/// loads via the `thumb://` scheme.
+///
+/// No-ops when:
+///   - `local.has_preview` is already true (scanner extracted an
+///     internal preview, or a prior sync pulled one)
+///   - the download failed (logged but non-fatal)
+///   - decode/encode failed (same)
+///
+/// Rate-limit sleep happens ONLY on the cache-miss path so a multi-
+/// version family doesn't waste N×rate_limit_ms after the first pull.
+#[allow(clippy::too_many_arguments)]
+fn pull_one_preview(
+    local: &LocalPkg,
+    preview_url: &str,
+    client: &hub::HubClient,
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    thumbs_dir: &std::path::Path,
+    counters: &Arc<parking_lot::Mutex<SyncCounters>>,
+    rate_limit_ms: u64,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    preview_cache: &Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    app: &AppHandle,
+) {
+    // Hub-canonical icon overrides scanner's best-effort guess. Only
+    // skip when this row has ALREADY been hub-pulled — has_preview by
+    // itself isn't a reliable signal (the scanner sets it for its own
+    // extracted guesses).
+    if local.hub_preview_pulled_at.is_some() {
+        return;
+    }
+    // Cache lookup; clone bytes out before releasing the lock so other
+    // workers can hit it concurrently while we decode.
+    let cached: Option<Vec<u8>> = {
+        let cache = preview_cache.lock();
+        cache.get(preview_url).cloned()
+    };
+    let bytes = match cached {
+        Some(b) => b,
+        None => match client.download_bytes(preview_url) {
+            Ok(b) => {
+                {
+                    let mut cache = preview_cache.lock();
+                    cache.insert(preview_url.to_string(), b.clone());
+                }
+                sleep_with_cancel(rate_limit_ms, cancel);
+                b
+            }
+            Err(e) => {
+                eprintln!("hub preview download failed for {}: {e:#}", local.id);
+                return;
+            }
+        },
+    };
+    let out = thumbnails::thumb_path(thumbs_dir, local.id);
+    match thumbnails::generate_from_bytes(&bytes, &out) {
+        Ok(()) => {
+            counters.lock().previews_pulled += 1;
+            let now = unix_now();
+            let _ = db.lock().execute(
+                "UPDATE packages SET has_preview = 1, hub_preview_pulled_at = ?2 \
+                 WHERE id = ?1",
+                params![local.id, now],
+            );
+            // Tell the frontend exactly which row's thumbnail just
+            // landed so it can bust the WebView's cached `thumb://N`
+            // and re-render that single tile in place.
+            let _ = app.emit("hub-preview-pulled", &local.id);
+        }
+        Err(e) => {
+            eprintln!("hub preview convert failed for {}: {e:#}", local.id);
+        }
+    }
+}
+
+/// Walk all matched-but-thumbnail-less rows that have a `hub_preview_url`
+/// stored, and pull each via `pull_one_preview`. Independent of B1/B2 —
+/// uses the stored URL directly, no per-creator search needed.
+///
+/// Runs before B1 so the user sees immediate progress on the previews
+/// counter, and so an early cancel still captures the cheap wins. The
+/// shared `preview_cache` means any URLs pulled here are free for B1/B2
+/// later if the same resource gets a fresh sibling match.
+///
+/// Respects the `creator` filter from the sync options — if the user
+/// scoped the sync to one creator, the backfill is scoped too.
+#[allow(clippy::too_many_arguments)]
+fn preview_backfill_pass(
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    client: &hub::HubClient,
+    thumbs_dir: &std::path::Path,
+    counters: &Arc<parking_lot::Mutex<SyncCounters>>,
+    rate_limit_ms: u64,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    preview_cache: &Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    creator_filter: Option<&str>,
+    app: &AppHandle,
+    worker_slots: &Arc<parking_lot::Mutex<Vec<WorkerSlot>>>,
+) {
+    let rows: Vec<(LocalPkg, String)> = {
+        let conn = db.lock();
+        // Backfill targets every matched row with a hub icon URL stored
+        // that hasn't been hub-pulled yet. Note: NOT gated on
+        // has_preview — the whole point is to override scanner's
+        // best-effort guesses with the hub-canonical icon. Already-
+        // hub-pulled rows (hub_preview_pulled_at IS NOT NULL) skip.
+        let mut sql = String::from(
+            "SELECT id, creator, package_name, has_preview, \
+                    hub_preview_url, hub_preview_pulled_at \
+               FROM packages \
+              WHERE hub_sync_state = 'matched' \
+                AND hub_preview_url IS NOT NULL \
+                AND hub_preview_pulled_at IS NULL \
+                AND creator <> ''",
+        );
+        let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(c) = creator_filter {
+            sql.push_str(" AND creator = ? COLLATE NOCASE");
+            binds.push(rusqlite::types::Value::Text(c.to_string()));
+        }
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("preview backfill: prepare failed: {e}");
+                return;
+            }
+        };
+        let mapped = stmt.query_map(params_ref.as_slice(), |r| {
+            Ok((
+                LocalPkg {
+                    id: r.get(0)?,
+                    creator: r.get(1)?,
+                    package_name: r.get(2)?,
+                    has_preview: r.get::<_, i64>(3)? != 0,
+                    hub_preview_pulled_at: r.get::<_, Option<i64>>(5)?,
+                },
+                r.get::<_, String>(4)?,
+            ))
+        });
+        match mapped {
+            Ok(it) => it.flatten().collect(),
+            Err(e) => {
+                eprintln!("preview backfill: query_map failed: {e}");
+                Vec::new()
+            }
+        }
+    };
+
+    // Always log the candidate count, even when zero — silent return on
+    // empty was hiding a real diagnostic signal for the user (couldn't
+    // tell "backfill ran and found nothing" from "backfill never ran").
+    emit_log(
+        app,
+        "info",
+        format!(
+            "Preview backfill scan: {} matched-but-thumbnailless candidate(s){}",
+            rows.len(),
+            match creator_filter {
+                Some(c) => format!(" (creator filter: {c})"),
+                None => String::new(),
+            }
+        ),
+    );
+    if rows.is_empty() {
+        return;
+    }
+    let backfill_total = rows.len();
+    // Surface the backfill as visible work on the global progress bar:
+    // set total = N rows, tick `done` per row processed. After the
+    // backfill returns, start_hub_sync resets these to B1's values
+    // (locals.len() / 0) before the rayon pool kicks off.
+    {
+        let mut c = counters.lock();
+        c.phase = "backfill".to_string();
+        c.total = backfill_total;
+        c.done = 0;
+    }
+    // Also reflect backfill on the worker strip so the right column
+    // isn't sitting at "(workers booting…)" for the entire pass. We
+    // commandeer slot 0 with a synthetic "backfill" creator label.
+    {
+        let mut slots = worker_slots.lock();
+        if let Some(s) = slots.get_mut(0) {
+            s.creator = "(backfill: previews)".to_string();
+            s.phase = "backfill".to_string();
+            s.done = 0;
+            s.total = backfill_total;
+        }
+    }
+    emit_progress(app, counters, worker_slots, "(backfill starting)");
+
+    for (i, (local, url)) in rows.into_iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) || counters.lock().gated {
+            break;
+        }
+        pull_one_preview(
+            &local,
+            &url,
+            client,
+            db,
+            thumbs_dir,
+            counters,
+            rate_limit_ms,
+            cancel,
+            preview_cache,
+            app,
+        );
+        // Tick global done + slot-0 done so both progress surfaces
+        // reflect backfill movement.
+        {
+            let mut c = counters.lock();
+            c.done = i + 1;
+        }
+        {
+            let mut slots = worker_slots.lock();
+            if let Some(s) = slots.get_mut(0) {
+                s.done = i + 1;
+            }
+        }
+        emit_progress(
+            app,
+            counters,
+            worker_slots,
+            &format!("{}.{}", local.creator, local.package_name),
+        );
+    }
+
+    // Release slot 0 back to idle so B1 can claim it cleanly. Emit one
+    // final progress event so the frontend sees the slot reset
+    // immediately — otherwise the UI keeps showing the last per-row
+    // emit (W0 commandeered at 2935/2935 = 100%) until B1's first
+    // emit fires, which can take several seconds (per-creator XF
+    // search HTTP latency).
+    {
+        let mut slots = worker_slots.lock();
+        if let Some(s) = slots.get_mut(0) {
+            s.creator = String::new();
+            s.phase = "idle".to_string();
+            s.done = 0;
+            s.total = 0;
+        }
+    }
+    emit_progress(app, counters, worker_slots, "(backfill complete)");
 }
 
 fn mark_local_failed(
@@ -1832,8 +2255,14 @@ struct SyncCounters {
     phase: String,
 }
 
-fn emit_progress(app: &AppHandle, counters: &Arc<parking_lot::Mutex<SyncCounters>>, current: &str) {
+fn emit_progress(
+    app: &AppHandle,
+    counters: &Arc<parking_lot::Mutex<SyncCounters>>,
+    worker_slots: &Arc<parking_lot::Mutex<Vec<WorkerSlot>>>,
+    current: &str,
+) {
     let snap = counters.lock();
+    let workers = worker_slots.lock().clone();
     let _ = app.emit(
         "hub-sync-progress",
         &HubSyncProgress {
@@ -1845,6 +2274,7 @@ fn emit_progress(app: &AppHandle, counters: &Arc<parking_lot::Mutex<SyncCounters
             previews_pulled: snap.previews_pulled,
             current: current.to_string(),
             current_status: if snap.gated { "gate".into() } else { snap.phase.clone() },
+            workers,
         },
     );
 }
@@ -1920,10 +2350,12 @@ pub async fn start_hub_sync(
             &app_for_log,
             "info",
             format!(
-                "Sync starting. workers={}, rate_limit_ms={}, only_missing={}, creator={:?}",
+                "Sync starting. workers={}, rate_limit_ms={}, only_missing={}, \
+                 pull_preview_for_no_thumb={}, creator={:?}",
                 options.workers,
                 options.rate_limit_ms,
                 options.only_missing,
+                options.pull_preview_for_no_thumb,
                 options.creator.as_deref(),
             ),
         );
@@ -1986,9 +2418,10 @@ pub async fn start_hub_sync(
             }
             let where_clause = clauses.join(" AND ");
             let sql = format!(
-                "SELECT id, creator, package_name, has_preview FROM packages
-                 WHERE {where_clause}
-                 ORDER BY creator COLLATE NOCASE, package_name COLLATE NOCASE",
+                "SELECT id, creator, package_name, has_preview, hub_preview_pulled_at
+                   FROM packages
+                  WHERE {where_clause}
+                  ORDER BY creator COLLATE NOCASE, package_name COLLATE NOCASE",
             );
             let mut stmt = match conn.prepare(&sql) {
                 Ok(s) => s,
@@ -2003,6 +2436,7 @@ pub async fn start_hub_sync(
                         creator: r.get(1)?,
                         package_name: r.get(2)?,
                         has_preview: r.get::<_, i64>(3)? != 0,
+                        hub_preview_pulled_at: r.get::<_, Option<i64>>(4)?,
                     })
                 })
                 .map_err(map_err)?
@@ -2037,6 +2471,67 @@ pub async fn start_hub_sync(
         let client = Arc::new(client);
         let creators_vec: Vec<(String, Vec<LocalPkg>)> = by_creator.into_iter().collect();
 
+        // Per-worker slot vector: one entry per rayon thread (indexed by
+        // `rayon::current_thread_index()`). Surfaced to the UI via the
+        // `workers` field on every progress event so the user can see
+        // what each parallel worker is doing.
+        let worker_slots: Arc<parking_lot::Mutex<Vec<WorkerSlot>>> =
+            Arc::new(parking_lot::Mutex::new(
+                (0..workers)
+                    .map(|i| WorkerSlot {
+                        slot: i,
+                        creator: String::new(),
+                        phase: "idle".to_string(),
+                        done: 0,
+                        total: 0,
+                    })
+                    .collect(),
+            ));
+
+        // Sync-wide preview URL → bytes cache. Shared across:
+        //   - pre-B1 preview_backfill_pass (single-threaded)
+        //   - all rayon workers' B1 preview-pull loops
+        //   - retry_one_keyword's inline B2 / L≤2 pulls
+        // This is THE dedup point — any CDN URL is fetched exactly once
+        // across the whole sync regardless of which phase / worker / row
+        // first encounters it.
+        let preview_cache: Arc<
+            parking_lot::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        > = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+        // Pre-B1 backfill pass: walks matched-but-thumbnailless rows
+        // that already have a stored hub_preview_url. Decoupled from
+        // the match pipeline so it doesn't matter whether `only_missing`
+        // is set — these rows ARE already matched, the backfill just
+        // catches up on the thumbnails they're missing.
+        if options.pull_preview_for_no_thumb && !cancel.load(Ordering::Relaxed) {
+            preview_backfill_pass(
+                &db,
+                client.as_ref(),
+                &thumbs_dir,
+                &counters,
+                options.rate_limit_ms,
+                &cancel,
+                &preview_cache,
+                options.creator.as_deref(),
+                &app,
+                &worker_slots,
+            );
+            // Reset counters so the B1 workers' first emit reports
+            // sensible values (locals.len() total, 0 done, "pin" phase)
+            // and the progress bar starts fresh for the match phase.
+            // Fire an emit_progress so the frontend sees the reset
+            // immediately — the rayon workers' first emits can be
+            // many seconds away (XF search HTTP).
+            {
+                let mut c = counters.lock();
+                c.phase = "pin".to_string();
+                c.total = total;
+                c.done = 0;
+            }
+            emit_progress(&app, &counters, &worker_slots, "(starting match phase)");
+        }
+
         let pool = match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
             Ok(p) => p,
             Err(e) => return Err(format!("rayon pool build: {e}")),
@@ -2058,6 +2553,8 @@ pub async fn start_hub_sync(
                     options.rate_limit_ms,
                     options.pull_preview_for_no_thumb,
                     &counters,
+                    &worker_slots,
+                    &preview_cache,
                 );
             });
         });

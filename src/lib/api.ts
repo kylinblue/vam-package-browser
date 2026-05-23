@@ -648,6 +648,23 @@ export interface HubSyncProgress {
   previews_pulled: number;
   current: string;
   current_status: string;
+  /** Per-rayon-worker snapshot. Length equals the `workers` config of the
+   *  current sync (1-16). Each entry tracks what its thread is doing
+   *  right now — useful for a side strip of mini progress bars so the
+   *  user can see all parallel work, not just the global aggregate. */
+  workers: WorkerSlot[];
+}
+
+export interface WorkerSlot {
+  slot: number;
+  /** Empty string when slot is idle. */
+  creator: string;
+  /** "idle" | "pin" (B1 broad) | "shortcut" (L≤2) | "fallback" (B2). */
+  phase: string;
+  /** Locals processed (matched / failed) for the creator on this slot. */
+  done: number;
+  /** Total locals belonging to the creator on this slot. */
+  total: number;
 }
 
 export interface HubSyncSummary {
