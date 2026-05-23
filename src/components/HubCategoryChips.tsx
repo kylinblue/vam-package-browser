@@ -45,6 +45,15 @@ export function HubCategoryChips({
   isUnidentifiedSelected,
 }: Props) {
   const total = counts.reduce((sum, c) => sum + c.count, 0);
+  // If `selected` points at a category the `counts` snapshot doesn't know
+  // about (e.g. a hub sync just populated `Audio` on a few packages, but
+  // `listHubCategories()` hasn't been re-fetched), render a synthetic chip
+  // so the active filter is always visible. Without this, no chip lights
+  // up — not even "All", whose active state requires `selected === null` —
+  // and the user sees an invisible filter narrowing the grid to a single
+  // hub_category (which by definition shows only sync'd packages).
+  const selectedKnown =
+    selected === null || counts.some((c) => c.hub_category === selected);
   return (
     <div className="type-chips">
       <button
@@ -56,6 +65,20 @@ export function HubCategoryChips({
         <span>All</span>
         <span className="type-chip-n">{total.toLocaleString()}</span>
       </button>
+      {!selectedKnown && selected !== null && (
+        <button
+          type="button"
+          className="type-chip active"
+          onClick={() => onSelect(null)}
+          title={`Active filter: ${selected} (not in the current chip aggregate — click to clear)`}
+        >
+          <span className="type-chip-emoji">
+            {HUB_CAT_EMOJI[selected] ?? "📦"}
+          </span>
+          <span>{selected}</span>
+          <span className="type-chip-n">?</span>
+        </button>
+      )}
       {counts.map((c) => (
         <button
           type="button"

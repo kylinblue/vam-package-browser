@@ -578,6 +578,23 @@ export default function App() {
     loadResults().catch(() => {});
   }, [loadResults]);
 
+  // Keep `hubCategoryCounts` (the chip-bar aggregate) in sync with the
+  // backing DB while we're in Fetched mode. Without this, a running hub
+  // sync can populate fresh hub_category values on packages that the chip
+  // bar doesn't know about — then any path that calls setSelectedHubCategory
+  // with one of those new values (most commonly the StatsPanel category
+  // bucket, which is computed live from visiblePackages) ends up with an
+  // active filter that no chip can highlight, looking like "ALL" while
+  // silently narrowing the grid to a single hub_category. The synthetic
+  // chip in HubCategoryChips covers the worst case, but this keeps the
+  // chip-bar counts honest between filter activations as well.
+  useEffect(() => {
+    if (viewMode !== "fetched") return;
+    listHubCategories()
+      .then(setHubCategoryCounts)
+      .catch(() => {});
+  }, [viewMode, loadResults]);
+
   // Listen for thumb-progress events from the Rust backend during generation.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
