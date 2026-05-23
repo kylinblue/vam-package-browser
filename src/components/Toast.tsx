@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 export type ToastKind = "ok" | "error";
 
@@ -64,13 +64,23 @@ function ToastItem({
   toast: ToastMessage;
   onDismiss: () => void;
 }) {
-  // Auto-dismiss timer. Re-arms whenever `toast` identity changes; we key
-  // by id at the stack level so a re-render of an existing toast doesn't
-  // reset its countdown.
+  // Auto-dismiss timer is strictly mount-only. The stack passes a fresh
+  // inline closure for `onDismiss` on every render (it has to — it closes
+  // over the toast's id), and if the effect depended on that callback,
+  // every new toast pushed onto the stack would re-arm the timer for
+  // every existing toast. With ten toasts queued in quick succession the
+  // first one would never expire because each subsequent push restarted
+  // its countdown. The latest-ref pattern keeps the timer untouched
+  // across re-renders while still calling the freshest dismiss callback.
+  const onDismissRef = useRef(onDismiss);
   useEffect(() => {
-    const id = window.setTimeout(onDismiss, AUTO_DISMISS_MS);
+    onDismissRef.current = onDismiss;
+  });
+  useEffect(() => {
+    const id = window.setTimeout(() => onDismissRef.current(), AUTO_DISMISS_MS);
     return () => window.clearTimeout(id);
-  }, [onDismiss]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onRevertClick = () => {
     toast.revert?.onRevert();
