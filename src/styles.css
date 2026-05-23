@@ -93,10 +93,13 @@ html, body, #root {
 }
 
 /* App-level toast — lives at the app root so it survives child
-   component unmounts (DetailView blanking out during a refetch, etc). */
+   component unmounts (DetailView blanking out during a refetch, etc).
+   `bottom` clears the always-visible .selection-bar + .statusbar at the
+   foot of the layout so the toast can't sit on top of the Apply / Clear
+   buttons during its 6s auto-dismiss window (see Toast.tsx). */
 .toast {
   position: fixed;
-  bottom: 20px;
+  bottom: 100px;
   right: 20px;
   z-index: 1000;
   max-width: 480px;
