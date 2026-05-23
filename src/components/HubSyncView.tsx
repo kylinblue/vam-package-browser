@@ -11,6 +11,7 @@ import {
   type HubSyncOptions,
   type HubSyncProgress,
   type HubSyncSummary,
+  type WorkerSlot,
 } from "../lib/api";
 
 const LOG_RING_SIZE = 300;
@@ -27,6 +28,10 @@ export function HubSyncView() {
   // Live progress when a sync is running. `null` when idle.
   const [progress, setProgress] = useState<HubSyncProgress | null>(null);
   const [running, setRunning] = useState(false);
+  // True between clicking Stop and the backend actually reporting inactive.
+  // Lets the UI show "Stopping…" so the click visibly registers even when
+  // workers take ~30s to drain in-flight HTTP requests.
+  const [stopping, setStopping] = useState(false);
   const [lastSummary, setLastSummary] = useState<HubSyncSummary | null>(null);
   const [opErr, setOpErr] = useState<string | null>(null);
 
@@ -66,21 +71,37 @@ export function HubSyncView() {
     loadStatus();
   }, [loadStatus]);
 
-  // HMR recovery: check if a backend sync is still running across page
-  // reloads. If yes, flip `running` so the UI reflects the in-flight work
-  // even though the JS-side handlers from the initiating click are gone.
+  // Backstop poll: the UI's `running` state is supposed to flip back
+  // when `await startHubSync()` resolves in onStartSync's finally block.
+  // That awaited promise can resolve slowly (workers draining in-flight
+  // HTTPs after cancel takes up to ~30s) or get orphaned by HMR / React
+  // closure replacement. Treat the backend's `hub_sync_running` atomic as
+  // the source of truth and reconcile our local state to it every 2s.
+  //
+  // This single effect covers both directions:
+  //   - sync started elsewhere (HMR reload, devtools) -> we flip running=true
+  //   - sync ended (stop click, completion, panic) -> we flip running=false
+  //     and clear the optimistic `stopping` flag.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const tick = async () => {
       try {
         const active = await hubSyncActive();
-        if (!cancelled && active) setRunning(true);
+        if (cancelled) return;
+        setRunning((cur) => {
+          if (cur !== active) return active;
+          return cur;
+        });
+        if (!active) setStopping(false);
       } catch {
-        /* ignore */
+        /* transient; retry next tick */
       }
-    })();
+    };
+    tick();
+    const handle = window.setInterval(tick, 2000);
     return () => {
       cancelled = true;
+      window.clearInterval(handle);
     };
   }, []);
 
@@ -94,6 +115,16 @@ export function HubSyncView() {
     return () => window.clearInterval(handle);
   }, [running, loadStatus]);
 
+  // Monotonic-progress guard. Three rayon workers fire progress events
+  // concurrently; Tauri's bridge from Rust → JS doesn't strictly preserve
+  // emit order across threads, so we can receive a snapshot where `done`
+  // is briefly smaller than a snapshot received moments earlier. That
+  // makes the percent bar twitch backward and feeds garbage into the
+  // rate-sample ring buffer. Drop any event whose `done` is below the
+  // high-water mark — the backend counters are increment-only, so a
+  // lower value is always out-of-order.
+  const maxDoneSeenRef = useRef<number>(0);
+
   // Subscribe to hub-sync-progress for live counters + rate sampling.
   // The `cancelled` flag handles React 18 StrictMode dev double-mount: if
   // the effect cleanup fires before the async listen() resolves, we'd
@@ -104,6 +135,13 @@ export function HubSyncView() {
     (async () => {
       const u = await listen<HubSyncProgress>("hub-sync-progress", (event) => {
         const p = event.payload;
+        // Drop out-of-order events; reset the high-water mark when a new
+        // sync starts (total changes, or done resets to a lower value
+        // alongside a fresh total).
+        if (p.done < maxDoneSeenRef.current && p.total > 0) {
+          return;
+        }
+        maxDoneSeenRef.current = p.done;
         setProgress(p);
 
         // Append to rate-sampling ring buffer.
@@ -190,6 +228,10 @@ export function HubSyncView() {
     setOpErr(null);
     setLastSummary(null);
     setProgress(null);
+    // Reset the monotonic-progress high-water mark so a fresh sync's
+    // initial low-`done` events aren't filtered as out-of-order.
+    maxDoneSeenRef.current = 0;
+    rateSamplesRef.current = [];
     const options: HubSyncOptions = {
       only_missing: onlyMissing,
       pull_preview_for_no_thumb: pullPreview,
@@ -210,10 +252,16 @@ export function HubSyncView() {
   }, [creatorFilter, onlyMissing, pullPreview, rateLimitMs, workers, loadStatus]);
 
   const onStopSync = useCallback(async () => {
+    // Optimistically flip the button to "Stopping…" so the click registers
+    // visually. The backstop poll above flips `running` -> false (and
+    // clears `stopping`) once the backend's `hub_sync_running` atomic
+    // settles, which can take up to ~30s for in-flight HTTPs to drain.
+    setStopping(true);
     try {
       await stopHubSync();
     } catch (e) {
       setOpErr(`stop: ${e}`);
+      setStopping(false);
     }
   }, []);
 
@@ -252,7 +300,7 @@ export function HubSyncView() {
         )}
       </button>
 
-      {isCollapsed ? null : (<>
+      {isCollapsed ? null : (<div className="hub-sync-body">
       <div className="hub-section">
         <h3>Catalog</h3>
         {statusErr && <div className="detail-error-inline">status: {statusErr}</div>}
@@ -293,6 +341,7 @@ export function HubSyncView() {
               />
               <Stat label="By filename" value={status.matched_by_filename.toLocaleString()} />
               <Stat label="By fuzzy" value={status.matched_by_fuzzy_title.toLocaleString()} />
+              <Stat label="By slug" value={status.matched_by_slug_match.toLocaleString()} />
               <Stat label="Not found" value={status.not_found.toLocaleString()} />
               <Stat label="Never synced" value={status.never_synced.toLocaleString()} />
               <Stat label="Failed" value={status.failed.toLocaleString()} />
@@ -327,68 +376,88 @@ export function HubSyncView() {
 
       <div className="hub-section">
         <h3>Run sync</h3>
-        <div className="hub-stat-row hub-controls">
-          <label className="hub-field">
-            <span>Creator filter</span>
-            <input
-              type="text"
-              value={creatorFilter}
-              onChange={(e) => setCreatorFilter(e.target.value)}
-              placeholder="(blank = all)"
-              disabled={running}
-            />
-          </label>
-          <label className="hub-field">
-            <span>Workers</span>
-            <input
-              type="number"
-              min={1}
-              max={8}
-              value={workers}
-              onChange={(e) => setWorkers(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
-              disabled={running}
-              style={{ width: 60 }}
-            />
-          </label>
-          <label className="hub-field">
-            <span>Rate limit (ms)</span>
-            <input
-              type="number"
-              min={100}
-              step={50}
-              value={rateLimitMs}
-              onChange={(e) => setRateLimitMs(Math.max(100, Number(e.target.value) || 700))}
-              disabled={running}
-              style={{ width: 90 }}
-            />
-          </label>
-          <label className="toolbar-toggle">
-            <input
-              type="checkbox"
-              checked={onlyMissing}
-              onChange={(e) => setOnlyMissing(e.target.checked)}
-              disabled={running}
-            />
-            <span>only_missing</span>
-          </label>
-          <label className="toolbar-toggle">
-            <input
-              type="checkbox"
-              checked={pullPreview}
-              onChange={(e) => setPullPreview(e.target.checked)}
-              disabled={running}
-            />
-            <span>pull preview thumbnails</span>
-          </label>
-          {!running ? (
-            <button type="button" onClick={onStartSync} className="hub-action hub-action-primary">
-              Start sync
-            </button>
-          ) : (
-            <button type="button" onClick={onStopSync} className="hub-action hub-action-stop">
-              Stop sync
-            </button>
-          )}
+        {/* 67/33 split: controls on the left, per-worker strip on the
+            right when a sync is in flight. Workers' bars are only as
+            many slots as the user configured (`workers` state). */}
+        <div className="hub-run-sync-split">
+          <div className="hub-stat-row hub-controls hub-run-sync-controls">
+            <label className="hub-field">
+              <span>Creator filter</span>
+              <input
+                type="text"
+                value={creatorFilter}
+                onChange={(e) => setCreatorFilter(e.target.value)}
+                placeholder="(blank = all)"
+                disabled={running}
+              />
+            </label>
+            <label className="hub-field">
+              <span>Workers</span>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={workers}
+                onChange={(e) => setWorkers(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+                disabled={running}
+                style={{ width: 60 }}
+              />
+            </label>
+            <label className="hub-field">
+              <span>Rate limit (ms)</span>
+              <input
+                type="number"
+                min={100}
+                step={50}
+                value={rateLimitMs}
+                onChange={(e) => setRateLimitMs(Math.max(100, Number(e.target.value) || 700))}
+                disabled={running}
+                style={{ width: 90 }}
+              />
+            </label>
+            <label className="toolbar-toggle">
+              <input
+                type="checkbox"
+                checked={onlyMissing}
+                onChange={(e) => setOnlyMissing(e.target.checked)}
+                disabled={running}
+              />
+              <span>only_missing</span>
+            </label>
+            <label className="toolbar-toggle">
+              <input
+                type="checkbox"
+                checked={pullPreview}
+                onChange={(e) => setPullPreview(e.target.checked)}
+                disabled={running}
+              />
+              <span>pull preview thumbnails</span>
+            </label>
+            {!running ? (
+              <button type="button" onClick={onStartSync} className="hub-action hub-action-primary">
+                Start sync
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onStopSync}
+                disabled={stopping}
+                className="hub-action hub-action-stop"
+              >
+                {stopping ? "Stopping…" : "Stop sync"}
+              </button>
+            )}
+          </div>
+
+          <div className="hub-run-sync-workers">
+            {running && progress && progress.workers && progress.workers.length > 0 ? (
+              progress.workers.map((w) => <WorkerSlotView key={w.slot} slot={w} />)
+            ) : (
+              <div className="hub-workers-idle">
+                {running ? "(workers booting…)" : "(start a sync to see per-worker status)"}
+              </div>
+            )}
+          </div>
         </div>
 
         {progress && (
@@ -409,7 +478,46 @@ export function HubSyncView() {
       </div>
 
       <LogPanel logs={logs} onCopy={copyLog} onClear={clearLog} />
-      </>)}
+      </div>)}
+    </div>
+  );
+}
+
+/// One row in the per-worker strip in the Run sync card. Shows the
+/// rayon slot id, the creator that worker is currently processing, its
+/// phase (pin / shortcut / fallback / idle), and a mini progress bar
+/// scoped to that creator's package count. Distinct from the global
+/// progress bar below — that one aggregates all workers; this one is
+/// honest about what THIS slot is doing right now.
+function WorkerSlotView({ slot }: { slot: WorkerSlot }) {
+  const pct = slot.total > 0 ? Math.min(100, (slot.done / slot.total) * 100) : 0;
+  const idle = slot.phase === "idle" || !slot.creator;
+  const phaseLabel = (() => {
+    switch (slot.phase) {
+      case "pin": return "B1";
+      case "shortcut": return "kw";
+      case "fallback": return "B2";
+      case "idle":
+      default: return "—";
+    }
+  })();
+  return (
+    <div className={`hub-worker-row ${idle ? "hub-worker-idle" : ""}`}>
+      <div className="hub-worker-head">
+        <span className="hub-worker-slot">W{slot.slot}</span>
+        <span className="hub-worker-creator" title={slot.creator || "(idle)"}>
+          {slot.creator || "(idle)"}
+        </span>
+        <span className="hub-worker-phase">{phaseLabel}</span>
+        {!idle && (
+          <span className="hub-worker-count">
+            {slot.done}/{slot.total}
+          </span>
+        )}
+      </div>
+      <div className="hub-worker-bar">
+        <div className="hub-worker-bar-fill" style={{ width: `${pct}%` }} />
+      </div>
     </div>
   );
 }
@@ -498,7 +606,7 @@ function ProgressBlock({
     <div className="hub-progress">
       <div className="hub-progress-row">
         <span className="hub-progress-phase">
-          {running ? `phase: ${progress.current_status}` : "(completed)"}
+          {running ? "Progress" : "(completed)"}
         </span>
         <span className="hub-progress-count">
           {progress.done} / {progress.total}

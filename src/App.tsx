@@ -18,6 +18,7 @@ import {
   getSetupState,
   listCreatorsWithCounts,
   listHubCategories,
+  countHubUnidentified,
   listTypeCounts,
   queryPackages,
   scanLibrary,
@@ -121,6 +122,72 @@ export default function App() {
   // App-level toast — see components/Toast.tsx for the why-not-local rationale.
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
+  // Refresh button pulse on hub-sync-progress events. We restart the CSS
+  // animation via classList reset + reflow rather than React state to
+  // avoid re-rendering the toolbar 30+ times per second during peak sync
+  // event rates. Throttled to ≥150ms between pulses so very high event
+  // rates don't visually saturate (only the first frame of each pulse
+  // is informative anyway).
+  const refreshBtnRef = useRef<HTMLButtonElement | null>(null);
+  const lastPulseAtRef = useRef<number>(0);
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    (async () => {
+      const u = await listen("hub-sync-progress", () => {
+        if (cancelled) return;
+        const now = performance.now();
+        if (now - lastPulseAtRef.current < 150) return;
+        lastPulseAtRef.current = now;
+        const btn = refreshBtnRef.current;
+        if (!btn) return;
+        // Toggle the class off, force reflow, toggle back on. The reflow
+        // is what re-triggers the CSS keyframe from frame 0.
+        btn.classList.remove("refresh-pulsing");
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+        void btn.offsetWidth;
+        btn.classList.add("refresh-pulsing");
+      });
+      if (cancelled) u();
+      else unlisten = u;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // hub-preview-pulled: backend fires one of these per successfully
+  // downloaded + decoded hub icon, carrying the package_id. We patch
+  // the row's has_preview to true in place AND bump thumbVersions[id]
+  // so the WebView re-fetches the `thumb://<id>` URL. Together that
+  // makes the new thumbnail appear in the grid live, no Refresh
+  // click needed.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    (async () => {
+      const u = await listen<number>("hub-preview-pulled", (event) => {
+        if (cancelled) return;
+        const id = event.payload;
+        if (typeof id !== "number") return;
+        setPackages((prev) =>
+          prev.map((p) => (p.id === id ? { ...p, has_preview: true } : p)),
+        );
+        setThumbVersions((prev) => ({
+          ...prev,
+          [id]: (prev[id] ?? 0) + 1,
+        }));
+      });
+      if (cancelled) u();
+      else unlisten = u;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Size + date range filter inputs are kept as raw strings; empty = no bound.
   const [minSizeMb, setMinSizeMb] = useState("");
   const [maxSizeMb, setMaxSizeMb] = useState("");
@@ -135,6 +202,10 @@ export default function App() {
   // hub resource (hub_resource_id IS NULL).
   const [selectedHubCategory, setSelectedHubCategory] = useState<string | null>(null);
   const [hubCategoryCounts, setHubCategoryCounts] = useState<HubCategoryCount[]>([]);
+  // Virtual "(unidentified)" chip state: when true, hub_category dropdown is
+  // cleared and the query filters to packages without a hub match.
+  const [unidentifiedSelected, setUnidentifiedSelected] = useState(false);
+  const [unidentifiedCount, setUnidentifiedCount] = useState(0);
 
   // Semantic-search state shelved alongside the Ask UI — see the commented
   // toolbar row below and TODO-semantic-search-ui.md. Reactivation: revert
@@ -396,6 +467,9 @@ export default function App() {
           viewMode === "fetched" && selectedHubCategory !== null
             ? selectedHubCategory
             : undefined,
+        // "(unidentified)" virtual chip: also fetched-mode-only.
+        hub_unmatched:
+          viewMode === "fetched" && unidentifiedSelected ? true : undefined,
       };
       const [rows, total] = await Promise.all([
         queryPackages(filter),
@@ -424,19 +498,22 @@ export default function App() {
     creators,
     selectedTags,
     selectedHubCategory,
+    unidentifiedSelected,
     viewMode,
   ]);
 
   const refreshTypeCountsAndCreators = useCallback(async () => {
     try {
-      const [tc, cs, hc] = await Promise.all([
+      const [tc, cs, hc, uc] = await Promise.all([
         listTypeCounts(),
         listCreatorsWithCounts(),
         listHubCategories(),
+        countHubUnidentified(),
       ]);
       setTypeCounts(tc);
       setCreators(cs);
       setHubCategoryCounts(hc);
+      setUnidentifiedCount(uc);
     } catch (e) {
       console.error("refresh aggregates:", e);
     }
@@ -500,6 +577,23 @@ export default function App() {
   useEffect(() => {
     loadResults().catch(() => {});
   }, [loadResults]);
+
+  // Keep `hubCategoryCounts` (the chip-bar aggregate) in sync with the
+  // backing DB while we're in Fetched mode. Without this, a running hub
+  // sync can populate fresh hub_category values on packages that the chip
+  // bar doesn't know about — then any path that calls setSelectedHubCategory
+  // with one of those new values (most commonly the StatsPanel category
+  // bucket, which is computed live from visiblePackages) ends up with an
+  // active filter that no chip can highlight, looking like "ALL" while
+  // silently narrowing the grid to a single hub_category. The synthetic
+  // chip in HubCategoryChips covers the worst case, but this keeps the
+  // chip-bar counts honest between filter activations as well.
+  useEffect(() => {
+    if (viewMode !== "fetched") return;
+    listHubCategories()
+      .then(setHubCategoryCounts)
+      .catch(() => {});
+  }, [viewMode, loadResults]);
 
   // Listen for thumb-progress events from the Rust backend during generation.
   useEffect(() => {
@@ -702,7 +796,17 @@ export default function App() {
           <HubCategoryChips
             counts={hubCategoryCounts}
             selected={selectedHubCategory}
-            onSelect={setSelectedHubCategory}
+            onSelect={(cat) => {
+              setSelectedHubCategory(cat);
+              if (cat !== null) setUnidentifiedSelected(false);
+            }}
+            unidentifiedCount={unidentifiedCount}
+            isUnidentifiedSelected={unidentifiedSelected}
+            onSelectUnidentified={() => {
+              // Toggle: clicking the same chip again clears the filter.
+              setUnidentifiedSelected((cur) => !cur);
+              setSelectedHubCategory(null);
+            }}
           />
         ) : (
           <TypeChips counts={typeCounts} selected={selectedType} onSelect={setSelectedType} />
@@ -793,14 +897,15 @@ export default function App() {
             Clear filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
           <button
+            ref={refreshBtnRef}
             type="button"
-            className="toolbar-clear-filters"
+            className="toolbar-clear-filters refresh-btn"
             onClick={() => {
               loadResults();
               refreshTypeCountsAndCreators();
             }}
             disabled={loading}
-            title="Re-query the grid + chip aggregates. The grid auto-refreshes after every override action; this is a safety net if you ever see stale data."
+            title="Re-query the grid + chip aggregates. The grid auto-refreshes after every override action; this is a safety net if you ever see stale data. Pulses while a hub sync is running."
           >
             {loading ? "Refreshing…" : "Refresh"}
           </button>

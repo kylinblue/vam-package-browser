@@ -24,6 +24,13 @@ import {
   type RelatedPackage,
 } from "../lib/api";
 
+/** Sentinel value for `selectedImage` meaning "show the package-level
+ *  preview thumbnail" (which is either the hub-pulled canonical icon or
+ *  the scanner's best-effort extraction — both live at `thumb://<id>`).
+ *  Distinguished from real in-package image paths via the `__` prefix,
+ *  which no zip entry path would ever start with. */
+const HUB_PREVIEW_SENTINEL = "__pkg_preview__";
+
 /** Canonical local PackageType list — mirrors the Rust PACKAGE_TYPE_VALUES
  *  constant in commands.rs. Used by the override dropdown. */
 const PACKAGE_TYPES: readonly PackageType[] = [
@@ -170,7 +177,16 @@ export function DetailView({
         if (!cancelled) {
           setDetail(d);
           setRelationships(r);
-          setSelectedImage(d.preview_path ?? d.images[0]?.path ?? null);
+          // Default selection priority:
+          //   1. Package-level thumbnail (hub-pulled icon OR scanner-extracted)
+          //      — visible via the sentinel.
+          //   2. The backend-detected preview_path (scene-sibling .jpg etc).
+          //   3. First in-package image.
+          //   4. None.
+          const defaultSelected = d.package.has_preview
+            ? HUB_PREVIEW_SENTINEL
+            : d.preview_path ?? d.images[0]?.path ?? null;
+          setSelectedImage(defaultSelected);
         }
       } catch (e) {
         if (!cancelled) setError(String(e));
@@ -332,7 +348,13 @@ export function DetailView({
 
             <div className="detail-body">
               <div className="detail-main">
-                {previewImage ? (
+                {previewImage === HUB_PREVIEW_SENTINEL ? (
+                  <img
+                    className="detail-hero"
+                    src={thumbUrl(currentId, currentId === packageId ? thumbVersion : 0)}
+                    alt="Package preview"
+                  />
+                ) : previewImage ? (
                   <img
                     className="detail-hero"
                     src={subThumbUrl(currentId, previewImage, true)}
@@ -349,9 +371,14 @@ export function DetailView({
                     No previewable images in this package.
                   </div>
                 )}
-                {previewImage && (
+                {previewImage && previewImage !== HUB_PREVIEW_SENTINEL && (
                   <div className="detail-hero-caption" title={previewImage}>
                     {previewImage}
+                  </div>
+                )}
+                {previewImage === HUB_PREVIEW_SENTINEL && (
+                  <div className="detail-hero-caption">
+                    Package preview (hub icon or scanner-extracted)
                   </div>
                 )}
               </div>
@@ -447,13 +474,15 @@ export function DetailView({
               </aside>
             </div>
 
-            {detail.images.length > 0 && (
+            {(detail.images.length > 0 || pkg.has_preview) && (
               <GallerySection
                 images={detail.images}
                 packageId={currentId}
                 selectedImage={selectedImage}
                 onSelect={setSelectedImage}
                 onHover={setHoveredImage}
+                showHubPreview={pkg.has_preview}
+                thumbVersion={currentId === packageId ? thumbVersion : 0}
               />
             )}
           </>
@@ -998,12 +1027,16 @@ function GallerySection({
   selectedImage,
   onSelect,
   onHover,
+  showHubPreview,
+  thumbVersion,
 }: {
   images: ImageEntry[];
   packageId: number;
   selectedImage: string | null;
   onSelect: (path: string) => void;
   onHover: (path: string | null) => void;
+  showHubPreview: boolean;
+  thumbVersion: number;
 }) {
   const [showAll, setShowAll] = useState(images.length <= GALLERY_INITIAL_CAP);
   const visible = showAll ? images : images.slice(0, GALLERY_INITIAL_CAP);
@@ -1013,7 +1046,8 @@ function GallerySection({
       onMouseLeave={() => onHover(null)}
     >
       <div className="detail-gallery-header">
-        Images in package ({images.length})
+        Images in package ({images.length}
+        {showHubPreview ? " + 1 package preview" : ""})
         {!showAll && (
           <button
             type="button"
@@ -1025,6 +1059,15 @@ function GallerySection({
         )}
       </div>
       <div className="detail-gallery-grid">
+        {showHubPreview && (
+          <HubPreviewThumb
+            packageId={packageId}
+            thumbVersion={thumbVersion}
+            selected={selectedImage === HUB_PREVIEW_SENTINEL}
+            onClick={() => onSelect(HUB_PREVIEW_SENTINEL)}
+            onHover={() => onHover(HUB_PREVIEW_SENTINEL)}
+          />
+        )}
         {visible.map((img) => (
           <ImageThumb
             key={img.path}
@@ -1037,6 +1080,37 @@ function GallerySection({
         ))}
       </div>
     </div>
+  );
+}
+
+/// Synthetic gallery item for the package-level thumbnail (hub-pulled
+/// icon or scanner-extracted). Always renders to `thumb://<id>` (vs the
+/// in-package `subThumbUrl` paths used by ImageThumb). Selectable like
+/// any other image so the user can flip back to it after clicking
+/// through in-package shots.
+function HubPreviewThumb({
+  packageId,
+  thumbVersion,
+  selected,
+  onClick,
+  onHover,
+}: {
+  packageId: number;
+  thumbVersion: number;
+  selected: boolean;
+  onClick: () => void;
+  onHover: () => void;
+}) {
+  return (
+    <button
+      className={`detail-gallery-item detail-gallery-item-hub ${selected ? "selected" : ""}`}
+      onClick={onClick}
+      onMouseEnter={onHover}
+      onFocus={onHover}
+      title="Package preview (hub icon or scanner-extracted)"
+    >
+      <img src={thumbUrl(packageId, thumbVersion)} alt="Package preview" />
+    </button>
   );
 }
 

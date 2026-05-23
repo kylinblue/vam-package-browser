@@ -419,6 +419,52 @@ impl HubClient {
         }
         Ok(bytes)
     }
+
+    /// Fetch and parse a single resource page by (slug, resource_id). Used by
+    /// the slug-match tier in `sync_one_creator` (commands.rs): when a local
+    /// package's normalized name matches an entry in the cached
+    /// `hub_resources` catalog but the XF per-author search missed it, this
+    /// gives us a HubMatch shaped identically to what `parse_search_results`
+    /// produces — so downstream HEAD-probe + filename_map + persist logic
+    /// treats slug-match candidates uniformly.
+    ///
+    /// Caller is expected to HEAD-probe the resulting HubMatch's
+    /// `/resources/{slug}.{id}/download` to verify the CDN filename matches
+    /// the local (Creator, Package). The page fetch here only provides the
+    /// enrichment metadata (title, author, category, billing, license, icon).
+    pub fn fetch_resource_page(&self, slug: &str, resource_id: i64) -> Result<HubMatch> {
+        let url = format!("{BASE_URL}/resources/{slug}.{resource_id}/");
+        let resp = self
+            .agent
+            .get(&url)
+            .call()
+            .with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        if status == 404 {
+            return Err(anyhow!("resource {resource_id} not found (404)"));
+        }
+        if status != 200 {
+            return Err(anyhow!("unexpected status {status} for {url}"));
+        }
+        // Cap body at 5 MB — resource pages run ~100-200 KB in practice, but
+        // a runaway response shouldn't OOM us.
+        const MAX: usize = 5 * 1024 * 1024;
+        let mut buf = Vec::with_capacity(128 * 1024);
+        let mut reader = resp.into_reader();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let n = reader.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            if buf.len() + n > MAX {
+                return Err(anyhow!("resource page > {MAX} bytes"));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let body = String::from_utf8_lossy(&buf).into_owned();
+        parse_resource_page(&body, resource_id, slug)
+    }
 }
 
 fn is_gate_page(html: &str) -> bool {
@@ -544,6 +590,120 @@ fn parse_search_results(html: &str) -> Result<Vec<HubMatch>> {
         });
     }
     Ok(out)
+}
+
+/// Parse a single `/resources/{slug}.{id}/` page into a `HubMatch`. Used by
+/// the slug-match tier when the cached `hub_resources` sitemap catalog
+/// surfaces a candidate that XF's per-author search missed.
+///
+/// The page DOM differs from search results:
+///   - title sits in `h1.p-title-value` with the silver-label category
+///     prepended inline (we slice it off)
+///   - author + license + hub-hosted indicator live under `div.p-description`
+///   - the resource icon is `.resource-header-avatar img`
+///
+/// Returns `Err` if the page is the age gate (caller should treat the
+/// whole sync as gated, same protocol as `search_resources_by_user`).
+fn parse_resource_page(html: &str, resource_id: i64, slug: &str) -> Result<HubMatch> {
+    if is_gate_page(html) {
+        return Err(anyhow!("gate: resource page returned the age gate"));
+    }
+    let doc = Html::parse_document(html);
+
+    let title_sel =
+        Selector::parse("h1.p-title-value").map_err(|e| anyhow!("title sel: {e:?}"))?;
+    let title_node = doc
+        .select(&title_sel)
+        .next()
+        .ok_or_else(|| anyhow!("no h1.p-title-value on resource page (slug={slug})"))?;
+
+    // Silver label inside the title carries the category, with optional
+    // billing-tier prefix. Strip identically to the search-result parser.
+    let silver_sel = Selector::parse(".label.label--silver")
+        .map_err(|e| anyhow!("silver sel: {e:?}"))?;
+    let silver_text = title_node
+        .select(&silver_sel)
+        .next()
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty());
+    let (billing_tier, category) = match silver_text.as_deref() {
+        Some(s) => {
+            let (tier, cat) = strip_billing_prefix(s);
+            (tier, Some(cat.to_string()))
+        }
+        None => (None, None),
+    };
+
+    // Title = direct text children of h1 only (excludes the silver label's
+    // content, which lives inside a child <span>). This avoids the fragile
+    // strip-prefix-of-concatenated-text approach.
+    let title: String = title_node
+        .children()
+        .filter_map(|n| {
+            if let scraper::Node::Text(t) = n.value() {
+                Some(t.text.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err(anyhow!("empty title on resource page (slug={slug})"));
+    }
+
+    // Author + labels live inside the description block. Scoping selectors
+    // to `.p-description` prevents picking up green/license labels from
+    // the recommendation strip further down the page.
+    let desc_sel =
+        Selector::parse(".p-description").map_err(|e| anyhow!("desc sel: {e:?}"))?;
+    let desc = doc.select(&desc_sel).next();
+
+    let author_sel =
+        Selector::parse("a.username").map_err(|e| anyhow!("author sel: {e:?}"))?;
+    let author = desc
+        .and_then(|d| d.select(&author_sel).next())
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .unwrap_or_default();
+
+    let green_sel =
+        Selector::parse(".label.label--green").map_err(|e| anyhow!("green sel: {e:?}"))?;
+    let is_hub_hosted = desc
+        .map(|d| d.select(&green_sel).next().is_some())
+        .unwrap_or(false);
+
+    // License: real-page markup wraps the license label in a wiki link.
+    // Match either form to be robust to future template tweaks.
+    let license_sel = Selector::parse(
+        r#"a[href*="license_help"] .label, .label[class*="cclicense"]"#,
+    )
+    .map_err(|e| anyhow!("license sel: {e:?}"))?;
+    let license = desc
+        .and_then(|d| d.select(&license_sel).next())
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let preview_sel = Selector::parse(".resource-header-avatar img")
+        .map_err(|e| anyhow!("preview sel: {e:?}"))?;
+    let preview_url = doc
+        .select(&preview_sel)
+        .next()
+        .and_then(|el| el.value().attr("src"))
+        .map(String::from);
+
+    Ok(HubMatch {
+        resource_id,
+        url: format!("{BASE_URL}/resources/{slug}.{resource_id}/"),
+        title,
+        author,
+        category,
+        billing_tier,
+        is_hub_hosted,
+        license,
+        preview_url,
+        tagline: None,
+        updated_at: None,
+    })
 }
 
 /// Pull the billing-tier prefix off a silver-label string. Examples:
@@ -844,10 +1004,108 @@ pub fn score_match(creator: &str, package_name: &str, hit: &HubMatch) -> u32 {
     0
 }
 
-fn normalize_compare(s: &str) -> String {
+/// Lowercase + drop non-alphanumeric. Shared with `commands.rs` for the
+/// slug-match tier (which normalizes local `package_name` and cached
+/// `hub_resources.slug` the same way before comparing).
+pub fn normalize_compare(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trimmed but structurally faithful fixture of a real free/hub-hosted
+    /// resource page (modeled after /resources/collider-editor.183/).
+    const FIXTURE_FREE_HOSTED: &str = r##"<!DOCTYPE html>
+<html><body>
+<div class="resource-view-header">
+  <div class="resource-header-avatar">
+    <img src="https://cdn.example/data/resource_icons/0/183.jpg" alt="Collider Editor">
+  </div>
+  <div class="p-title-description">
+    <div class="p-title">
+      <h1 class="p-title-value">
+        <span class="label label--silver" dir="auto">Plugins + Scripts</span><span class="label-append">&nbsp;</span>Collider Editor
+      </h1>
+    </div>
+    <div class="p-description">
+      <ul class="listInline listInline--bullet">
+        <li><a href="/members/acid-bubbles.18/" class="username">Acid Bubbles</a></li>
+        <li><span class="label label--green">Hub-Hosted VAR</span></li>
+        <li><a href="https://hub.virtamate.com/wiki/license_help/"><span class="label cclicenseccbysa">CC BY-SA</span></a></li>
+      </ul>
+    </div>
+  </div>
+</div>
+<div class="resource-recommendations">
+  <!-- Recommendation strip; must NOT bleed into our scoped selectors. -->
+  <span class="label label--green">Hub-Hosted VAR</span>
+  <a class="username" href="/members/somebody.99/">Somebody</a>
+</div>
+</body></html>"##;
+
+    /// Fixture for a paid resource (silver label = "Paid Looks") to confirm
+    /// the billing-tier prefix gets stripped into a separate field, and that
+    /// absent green-label means is_hub_hosted = false.
+    const FIXTURE_PAID: &str = r##"<!DOCTYPE html>
+<html><body>
+<div class="resource-header-avatar">
+  <img src="https://cdn.example/data/resource_icons/12/12345.jpg" alt="Some Look">
+</div>
+<div class="p-title-description">
+  <div class="p-title">
+    <h1 class="p-title-value">
+      <span class="label label--silver">Paid Looks</span><span class="label-append">&nbsp;</span>Some Look
+    </h1>
+  </div>
+  <div class="p-description">
+    <a href="/members/some-author.99/" class="username">SomeAuthor</a>
+  </div>
+</div>
+</body></html>"##;
+
+    #[test]
+    fn parses_free_hosted_resource_page() {
+        let hm = parse_resource_page(FIXTURE_FREE_HOSTED, 183, "collider-editor").unwrap();
+        assert_eq!(hm.resource_id, 183);
+        assert_eq!(hm.title, "Collider Editor");
+        assert_eq!(hm.author, "Acid Bubbles");
+        assert_eq!(hm.category.as_deref(), Some("Plugins + Scripts"));
+        assert_eq!(hm.billing_tier, None);
+        assert!(hm.is_hub_hosted);
+        assert_eq!(hm.license.as_deref(), Some("CC BY-SA"));
+        assert!(hm
+            .preview_url
+            .as_deref()
+            .unwrap()
+            .contains("/data/resource_icons/0/183.jpg"));
+        assert_eq!(
+            hm.url,
+            "https://hub.virtamate.com/resources/collider-editor.183/"
+        );
+    }
+
+    #[test]
+    fn parses_paid_resource_page() {
+        let hm = parse_resource_page(FIXTURE_PAID, 12345, "some-look").unwrap();
+        assert_eq!(hm.title, "Some Look");
+        assert_eq!(hm.author, "SomeAuthor");
+        assert_eq!(hm.category.as_deref(), Some("Looks"));
+        assert_eq!(hm.billing_tier.as_deref(), Some("paid"));
+        assert!(!hm.is_hub_hosted);
+        assert!(hm.license.is_none());
+    }
+
+    #[test]
+    fn rejects_gate_page() {
+        let gate = "<html><body>Adult Content Warning vamhubconsent</body></html>";
+        let res = parse_resource_page(gate, 1, "x");
+        let err = res.expect_err("gate page must be rejected");
+        assert!(format!("{err}").contains("gate"), "got: {err}");
+    }
 }
 

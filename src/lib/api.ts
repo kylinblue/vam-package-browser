@@ -61,7 +61,7 @@ export interface PackageRow {
   hub_license: string | null;
   hub_lastmod: number | null;
   hub_external_url: string | null;
-  /** "filename" | "fuzzy_title" | "manual" | "override" | "inherit" | null. */
+  /** "filename" | "fuzzy_title" | "slug_match" | "manual" | "override" | "inherit" | null. */
   hub_match_method: string | null;
   /** User-override lock flags (0/1). When 1, the corresponding field
    *  resists auto-sync overwrites — sync writers honor these via CASE
@@ -117,6 +117,10 @@ export interface QueryFilter {
   /** Hub category filter (Fetched mode primary axis). Exact-match on the
    *  canonical display string returned by the hub (e.g. "Looks"). */
   hub_category?: string;
+  /** When true, restrict to packages with no hub_category (= not currently
+   *  matched). Mutually exclusive with hub_category — hub_category wins
+   *  if both are set. */
+  hub_unmatched?: boolean;
 }
 
 export interface Namespace {
@@ -266,6 +270,12 @@ export interface HubCategoryCount {
 
 export async function listHubCategories(): Promise<HubCategoryCount[]> {
   return invoke<HubCategoryCount[]>("list_hub_categories");
+}
+
+/** Count of non-hidden packages with no hub_category (= not currently matched).
+ *  Drives the "(unidentified)" virtual chip alongside listHubCategories. */
+export async function countHubUnidentified(): Promise<number> {
+  return invoke<number>("count_hub_unidentified");
 }
 
 export async function setFavorite(id: number, value: boolean): Promise<void> {
@@ -644,6 +654,23 @@ export interface HubSyncProgress {
   previews_pulled: number;
   current: string;
   current_status: string;
+  /** Per-rayon-worker snapshot. Length equals the `workers` config of the
+   *  current sync (1-16). Each entry tracks what its thread is doing
+   *  right now — useful for a side strip of mini progress bars so the
+   *  user can see all parallel work, not just the global aggregate. */
+  workers: WorkerSlot[];
+}
+
+export interface WorkerSlot {
+  slot: number;
+  /** Empty string when slot is idle. */
+  creator: string;
+  /** "idle" | "pin" (B1 broad) | "shortcut" (L≤2) | "fallback" (B2). */
+  phase: string;
+  /** Locals processed (matched / failed) for the creator on this slot. */
+  done: number;
+  /** Total locals belonging to the creator on this slot. */
+  total: number;
 }
 
 export interface HubSyncSummary {
@@ -681,6 +708,7 @@ export interface HubStatus {
   matched: number;
   matched_by_filename: number;
   matched_by_fuzzy_title: number;
+  matched_by_slug_match: number;
   not_found: number;
   failed: number;
   never_synced: number;
