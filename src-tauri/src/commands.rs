@@ -3872,6 +3872,27 @@ fn build_order_clause(filter: &QueryFilter) -> String {
         // re-downloads or replaces a .var after the initial scan — it should
         // resurface as "newly added" even though the row was created earlier.
         "scanned" => format!("max(scanned_at, file_mtime) {dir}"),
+        // `hub_category` is already the effective category — when the user
+        // overrides via set_hub_category, the column is updated in place
+        // (hub_category_original preserves the pre-override value, and the
+        // hub_category_manual flag protects it from auto-sync overwrites).
+        // So a plain ORDER BY hub_category gives the user's requested
+        // "overridden if set, otherwise the auto-matched original" semantic
+        // for free. Unmatched rows (NULL) are pushed to the end in both
+        // directions so the sort stays useful regardless of match coverage,
+        // and creator/package_name are added as readable tiebreakers.
+        "hub_category" => format!(
+            "(hub_category IS NULL) ASC, hub_category COLLATE NOCASE {dir}, \
+             creator COLLATE NOCASE ASC, package_name COLLATE NOCASE ASC"
+        ),
+        // Heuristic package_type sort — used by the "Category" UI sort
+        // outside Fetched mode, where the grid badge shows package_type
+        // rather than hub_category. NULL-safe by accident (the column is
+        // NOT NULL in practice; scanner writes "Unknown" rather than NULL).
+        "package_type" => format!(
+            "package_type COLLATE NOCASE {dir}, \
+             creator COLLATE NOCASE ASC, package_name COLLATE NOCASE ASC"
+        ),
         // Default & "creator"
         _ => format!("creator COLLATE NOCASE {dir}, package_name COLLATE NOCASE ASC"),
     };

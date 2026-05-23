@@ -464,7 +464,18 @@ export default function App() {
         // Inclusive end-of-day: add (86400 - 1) so a maxDate of "2026-05-15"
         // covers everything modified on that calendar day.
         max_mtime: dateStringToUnixEnd(maxDate),
-        sort_by: sortBy,
+        // Translate the UI-only "category" sort intent to the actual backend
+        // column based on viewMode: Fetched shows the hub_category badge so
+        // sort by hub_category (which already holds the effective value —
+        // user override if set, auto-matched original otherwise — see
+        // build_order_clause in commands.rs); Simple/Tagged show the
+        // heuristic package_type so sort by that.
+        sort_by:
+          sortBy === "category"
+            ? viewMode === "fetched"
+              ? "hub_category"
+              : "package_type"
+            : sortBy,
         sort_order: sortOrder,
         limit: 10000,
         // Only push tag filter when in tagged mode — otherwise switching
@@ -949,6 +960,12 @@ export default function App() {
               <option value="package_mtime:asc">Packaged oldest</option>
               <option value="scanned:desc">Added newest</option>
               <option value="scanned:asc">Added oldest</option>
+              <option value="category:asc">
+                {viewMode === "fetched" ? "Hub category A→Z" : "Type A→Z"}
+              </option>
+              <option value="category:desc">
+                {viewMode === "fetched" ? "Hub category Z→A" : "Type Z→A"}
+              </option>
             </select>
           </label>
 

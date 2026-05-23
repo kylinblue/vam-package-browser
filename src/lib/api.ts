@@ -83,7 +83,15 @@ export type SortField =
   | "size"
   | "mtime"
   | "package_mtime"
-  | "scanned";
+  | "scanned"
+  // UI intent — translated to a real backend column in App.tsx based on
+  // viewMode (fetched → hub_category, otherwise → package_type) so a single
+  // "Category" sort option in the toolbar tracks whichever category column
+  // is actually being displayed in the grid badges.
+  | "category"
+  // Real backend keys the UI may also send directly (mode-independent).
+  | "hub_category"
+  | "package_type";
 export type SortOrder = "asc" | "desc";
 
 export interface QueryFilter {
