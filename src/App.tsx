@@ -798,7 +798,13 @@ export default function App() {
             selected={selectedHubCategory}
             onSelect={(cat) => {
               setSelectedHubCategory(cat);
-              if (cat !== null) setUnidentifiedSelected(false);
+              // Always clear the peer "(unidentified)" axis — clicking a
+              // specific category replaces it, and clicking "All" (cat=null)
+              // means "no narrowing on this row", which must include the
+              // (unidentified) chip. Previously this guard read
+              // `if (cat !== null)`, so the All chip left an invisible
+              // unidentified-only filter applied.
+              setUnidentifiedSelected(false);
             }}
             unidentifiedCount={unidentifiedCount}
             isUnidentifiedSelected={unidentifiedSelected}
