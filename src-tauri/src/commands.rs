@@ -3872,17 +3872,23 @@ fn build_order_clause(filter: &QueryFilter) -> String {
         // re-downloads or replaces a .var after the initial scan — it should
         // resurface as "newly added" even though the row was created earlier.
         "scanned" => format!("max(scanned_at, file_mtime) {dir}"),
-        // `hub_category` is already the effective category — when the user
-        // overrides via set_hub_category, the column is updated in place
-        // (hub_category_original preserves the pre-override value, and the
-        // hub_category_manual flag protects it from auto-sync overwrites).
-        // So a plain ORDER BY hub_category gives the user's requested
-        // "overridden if set, otherwise the auto-matched original" semantic
-        // for free. Unmatched rows (NULL) are pushed to the end in both
-        // directions so the sort stays useful regardless of match coverage,
-        // and creator/package_name are added as readable tiebreakers.
+        // "Hub category" sort — must mirror what the badge in Fetched mode
+        // actually shows on each tile, which is:
+        //   COALESCE(hub_category, package_type)
+        // (matched/overridden rows display hub_category; unmatched ghost
+        // rows fall back to the heuristic package_type — see PackageGrid's
+        // displayBadge). Sorting by the same expression keeps the "literal"
+        // promise: rows order by the label the user can read, regardless of
+        // whether it came from the hub or the heuristic. The
+        // hub_category_manual override semantic ("overridden if set,
+        // otherwise the auto-matched original") falls out for free — the
+        // hub_category column is updated in place on override (with
+        // hub_category_original preserving the pre-override value, and
+        // hub_category_manual protecting against auto-sync overwrites).
+        // No need to special-case NULLs since package_type is non-NULL.
+        // Creator/package_name added as readable tiebreakers.
         "hub_category" => format!(
-            "(hub_category IS NULL) ASC, hub_category COLLATE NOCASE {dir}, \
+            "COALESCE(hub_category, package_type) COLLATE NOCASE {dir}, \
              creator COLLATE NOCASE ASC, package_name COLLATE NOCASE ASC"
         ),
         // Heuristic package_type sort — used by the "Category" UI sort
