@@ -1354,6 +1354,114 @@ html, body, #root {
   color: var(--fg);
 }
 
+/* ---- ClassifierPane ("Tagged" mode) ---- */
+
+/* Mirrors HubSyncView's toolbar placement: lives inside the .toolbar block,
+   shown only when viewMode === "tagged". Compact single-row layout for the
+   common case (counts + buttons); collapsible sub-rows for the API key
+   form, advanced overrides, and live progress. */
+.classifier-pane {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.classifier-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.classifier-row-sub {
+  font-size: 11px;
+  padding-left: 4px;
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+}
+
+.classifier-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  margin-right: 4px;
+}
+
+.classifier-stat strong {
+  color: var(--fg);
+}
+
+.classifier-stat-dim {
+  color: var(--fg-dim);
+}
+
+.classifier-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.classifier-btn {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.classifier-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.classifier-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.classifier-btn-stop {
+  border-color: #c66;
+  color: #ffb0b0;
+}
+
+.classifier-btn-link {
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.classifier-btn-link:hover {
+  color: var(--fg);
+}
+
+.classifier-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.classifier-field > span {
+  color: var(--fg-dim);
+}
+
+.classifier-err {
+  color: #ff9a9a;
+}
+
 /* ---- HubSyncView ("Fetched" mode) ---- */
 
 /* Hub sync controls live inside the toolbar in Fetched mode (App.tsx).

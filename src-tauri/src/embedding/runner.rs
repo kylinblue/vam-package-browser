@@ -3,6 +3,7 @@
 //! yet have a row in `family_embeddings`, builds the input text, encodes
 //! in batches, and upserts. Re-runnable: skips already-embedded rows.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -156,12 +157,33 @@ fn build_input_text(fam: &FamilyRow, kind: InputKind) -> Option<String> {
 /// Progress logged every batch. Errors on a single batch abort the run
 /// — partial progress is preserved (each batch commits inside its own
 /// transaction). Resume by re-running.
+///
+/// Equivalent to `embed_missing_with_progress` with a never-cancelled flag
+/// and a no-op progress sink — used by the CLI binary.
 pub fn embed_missing(
     conn: &Arc<Mutex<Connection>>,
     model: ModelChoice,
     input_kind: InputKind,
     limit: Option<usize>,
     batch_size: usize,
+) -> Result<EmbedRunStats> {
+    let cancel = AtomicBool::new(false);
+    embed_missing_with_progress(conn, model, input_kind, limit, batch_size, &cancel, |_| {})
+}
+
+/// Cancellable + progress-reporting variant. The GUI's `start_embedding_run`
+/// command uses this to plumb a shared `AtomicBool` for stop signalling and
+/// a closure that emits `embed-run-progress` events. Progress is emitted at
+/// the end of every batch — after the per-batch transaction commits — so the
+/// `EmbedRunStats` snapshot is always durable.
+pub fn embed_missing_with_progress<F: FnMut(&EmbedRunStats)>(
+    conn: &Arc<Mutex<Connection>>,
+    model: ModelChoice,
+    input_kind: InputKind,
+    limit: Option<usize>,
+    batch_size: usize,
+    cancel: &AtomicBool,
+    mut on_progress: F,
 ) -> Result<EmbedRunStats> {
     let start = Instant::now();
     let needs_tags = matches!(input_kind, InputKind::PurposeWithTags);
@@ -178,10 +200,24 @@ pub fn embed_missing(
         input_kind.name()
     );
 
+    // Initial emit so the UI knows the candidate count immediately.
+    let initial_stats = EmbedRunStats {
+        model: model.name().to_string(),
+        input_kind: input_kind.name().to_string(),
+        candidates,
+        embedded: 0,
+        skipped_empty: 0,
+        elapsed_secs: 0.0,
+    };
+    on_progress(&initial_stats);
+
     let mut embedded = 0usize;
     let mut skipped_empty = 0usize;
 
     for (batch_idx, chunk) in pending.chunks(batch_size).enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         // Build inputs for this batch; skip any that come up empty.
         let mut ids: Vec<i64> = Vec::with_capacity(chunk.len());
         let mut texts: Vec<String> = Vec::with_capacity(chunk.len());
@@ -230,6 +266,16 @@ pub fn embed_missing(
             batch_idx + 1,
             embedded as f64 / start.elapsed().as_secs_f64().max(0.001),
         );
+
+        let snap = EmbedRunStats {
+            model: model.name().to_string(),
+            input_kind: input_kind.name().to_string(),
+            candidates,
+            embedded,
+            skipped_empty,
+            elapsed_secs: start.elapsed().as_secs_f64(),
+        };
+        on_progress(&snap);
     }
 
     Ok(EmbedRunStats {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AuthorPicker } from "./components/AuthorPicker";
+import { ClassifierPane } from "./components/ClassifierPane";
 import { DetailView } from "./components/DetailView";
 import { FacetPanel } from "./components/FacetPanel";
 import { HubSyncView } from "./components/HubSyncView";
@@ -219,6 +220,14 @@ export default function App() {
   // Viewport width is owned here (lifted from PackageGrid) so we can snap the
   // tile-size slider to viewport-aware "neat" positions in real time.
   const [viewportWidth, setViewportWidth] = useState(0);
+
+  // Bumped after the classifier (tag/embed) run completes, forcing
+  // FacetPanel to remount + re-fetch its namespace/tag-count data so the
+  // sidebar reflects newly-applied tags.
+  const [facetRefreshNonce, setFacetRefreshNonce] = useState(0);
+  // Bumped on scan completion. ClassifierPane watches this so its "N pending"
+  // counter reflects the newly-discovered families.
+  const [classifierStatusNonce, setClassifierStatusNonce] = useState(0);
 
   const [scanning, setScanning] = useState(false);
   const [generatingThumbs, setGeneratingThumbs] = useState(false);
@@ -639,6 +648,10 @@ export default function App() {
         );
         await refreshTypeCountsAndCreators();
         await loadResults();
+        // Scan auto-runs family::recompute, so a fresh package on disk now
+        // exists as a package_family row with tagging_state IS NULL. Bump
+        // the nonce so ClassifierPane refetches its pending count.
+        setClassifierStatusNonce((n) => n + 1);
       } catch (e) {
         setStatusMsg(`scan error: ${e}`);
       } finally {
@@ -1048,13 +1061,25 @@ export default function App() {
         </div>
 
         {/* Hub sync controls live inside the toolbar in Fetched mode so the
-            collapsed handle sits flush with the rest of the filter UI. */}
+            collapsed handle sits flush with the rest of the filter UI.
+            Classifier controls do the same for Tagged mode. */}
         {viewMode === "fetched" && <HubSyncView />}
+        {viewMode === "tagged" && (
+          <ClassifierPane
+            refreshNonce={classifierStatusNonce}
+            onRunComplete={() => {
+              setFacetRefreshNonce((n) => n + 1);
+              refreshTypeCountsAndCreators().catch(() => {});
+              loadResults().catch(() => {});
+            }}
+          />
+        )}
       </div>
 
       <div className="content-area">
         {viewMode === "tagged" && (
           <FacetPanel
+            key={facetRefreshNonce}
             selectedTags={selectedTags}
             onChange={setSelectedTags}
           />

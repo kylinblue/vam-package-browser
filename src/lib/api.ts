@@ -913,3 +913,145 @@ export async function clearOverride(
 ): Promise<ClearOverrideReport> {
   return invoke<ClearOverrideReport>("clear_override", { packageIds, field });
 }
+
+// ===== Classifier (tagger + embedder) =================================
+
+export interface TaggingStatus {
+  has_api_key: boolean;
+  api_key_length: number;
+  taxonomy_seeded: boolean;
+  taxonomy_active: number;
+  families_total: number;
+  families_pending: number;
+  families_done: number;
+  families_failed: number;
+  taxonomy_version: string;
+}
+
+export interface EmbeddingStatus {
+  families_with_purpose: number;
+  families_missing_embedding: number;
+  families_embedded: number;
+  model: string;
+  input_kind: string;
+}
+
+export interface TaggingProgress {
+  batches: number;
+  records_sent: number;
+  records_done: number;
+  records_failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  /** "running" | "completed" | "cancelled" | "failed" */
+  state: string;
+  error: string | null;
+}
+
+export interface EmbeddingProgress {
+  candidates: number;
+  embedded: number;
+  skipped_empty: number;
+  state: string;
+  error: string | null;
+}
+
+export interface TaggingRunOptions {
+  /** Default "v4" — taxonomy_version label written to each row. */
+  taxonomy_version?: string;
+  /** Default "grok-4.3". */
+  model?: string;
+  /** Default 100 records per Grok call. */
+  batch_size?: number;
+  /** Default 1000 ms sleep between batches. */
+  rate_limit_ms?: number;
+  /** Cap on rows processed this run (UI: "Tag first N"). */
+  limit?: number;
+  /** Restrict to specific family ids (advanced — usually unset from the UI). */
+  only_ids?: number[];
+  /** No API calls; just log what would be sent. */
+  dry_run?: boolean;
+}
+
+export interface TaggingRunSummary {
+  batches: number;
+  records_sent: number;
+  records_done: number;
+  records_failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cancelled: boolean;
+}
+
+export interface EmbeddingRunOptions {
+  limit?: number;
+  batch_size?: number;
+}
+
+export interface EmbeddingRunSummary {
+  model: string;
+  input_kind: string;
+  candidates: number;
+  embedded: number;
+  skipped_empty: number;
+  elapsed_secs: number;
+  cancelled: boolean;
+}
+
+export async function taggingStatus(): Promise<TaggingStatus> {
+  return invoke<TaggingStatus>("tagging_status");
+}
+
+export async function embeddingStatus(): Promise<EmbeddingStatus> {
+  return invoke<EmbeddingStatus>("embedding_status");
+}
+
+export async function setXaiApiKey(key: string): Promise<void> {
+  return invoke("set_xai_api_key", { key });
+}
+
+export async function clearXaiApiKey(): Promise<void> {
+  return invoke("clear_xai_api_key");
+}
+
+export async function taggingActive(): Promise<boolean> {
+  return invoke<boolean>("tagging_active");
+}
+
+export async function embeddingActive(): Promise<boolean> {
+  return invoke<boolean>("embedding_active");
+}
+
+export async function startTaggingRun(
+  options: TaggingRunOptions = {},
+): Promise<TaggingRunSummary> {
+  return invoke<TaggingRunSummary>("start_tagging_run", { options });
+}
+
+export async function stopTaggingRun(): Promise<void> {
+  return invoke("stop_tagging_run");
+}
+
+export async function startEmbeddingRun(
+  options: EmbeddingRunOptions = {},
+): Promise<EmbeddingRunSummary> {
+  return invoke<EmbeddingRunSummary>("start_embedding_run", { options });
+}
+
+export async function stopEmbeddingRun(): Promise<void> {
+  return invoke("stop_embedding_run");
+}
+
+export interface RecomputeFamiliesSummary {
+  families_before: number;
+  families_after: number;
+  families_added: number;
+  packages_linked_this_run: number;
+  families_with_latest: number;
+  families_inheriting_tags: number;
+  family_tag_rows_added: number;
+}
+
+export async function recomputeFamilies(): Promise<RecomputeFamiliesSummary> {
+  return invoke<RecomputeFamiliesSummary>("recompute_families");
+}

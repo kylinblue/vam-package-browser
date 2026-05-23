@@ -8,6 +8,7 @@
 //! is NULL or `taxonomy_version` doesn't match the current run.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -61,11 +62,34 @@ struct GrokResponse {
 }
 
 /// Run the tagging loop. Caller owns the connection (single-writer model).
-/// `client` is None for dry-runs.
+/// `client` is None for dry-runs. Equivalent to `run_with_progress` with a
+/// never-cancelled flag and a no-op progress sink — used by the CLI binary,
+/// which surfaces progress via eprintln logs only.
 pub fn run(
     conn: &Mutex<Connection>,
     client: Option<&GrokClient>,
     cfg: &RunnerConfig,
+) -> Result<RunStats> {
+    let cancel = AtomicBool::new(false);
+    run_with_progress(conn, client, cfg, &cancel, |_| {})
+}
+
+/// Cancellable + progress-reporting variant. The GUI's `start_tagging_run`
+/// command uses this to plumb a shared `AtomicBool` for stop signalling and
+/// a closure that emits `tag-run-progress` events to the frontend. Progress
+/// is emitted at the end of every batch (after the DB write commits), so the
+/// `RunStats` snapshot passed to `on_progress` is the canonical running total.
+///
+/// Cancellation checkpoints: start of each loop iteration AND after each
+/// rate-limit sleep. A cancel that arrives mid-API-call still completes that
+/// batch (its DB write is committed) before the loop exits — clean stop, no
+/// half-written batch.
+pub fn run_with_progress<F: FnMut(&RunStats)>(
+    conn: &Mutex<Connection>,
+    client: Option<&GrokClient>,
+    cfg: &RunnerConfig,
+    cancel: &AtomicBool,
+    mut on_progress: F,
 ) -> Result<RunStats> {
     let mut stats = RunStats::default();
     let valid_tags = load_valid_tags(&conn.lock())?;
@@ -82,6 +106,9 @@ pub fn run(
     let mut processed_total = 0usize;
 
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         if let Some(cap) = cfg.limit {
             if processed_total >= cap {
                 break;
@@ -195,8 +222,10 @@ pub fn run(
         stats.records_sent += record_ids.len();
         processed_total += record_ids.len() + build_failed.len();
 
+        on_progress(&stats);
+
         if cfg.rate_limit_ms > 0 {
-            thread::sleep(Duration::from_millis(cfg.rate_limit_ms));
+            sleep_with_cancel(cfg.rate_limit_ms, cancel);
         }
     }
 
@@ -205,6 +234,18 @@ pub fn run(
     }
 
     Ok(stats)
+}
+
+/// Interruptible sleep — wakes within ~100ms of a cancel signal. Used between
+/// batches so a Stop click during the rate-limit pause doesn't have to wait
+/// out the full second.
+fn sleep_with_cancel(ms: u64, cancel: &AtomicBool) {
+    let mut remaining = ms;
+    while remaining > 0 && !cancel.load(Ordering::Relaxed) {
+        let chunk = remaining.min(100);
+        thread::sleep(Duration::from_millis(chunk));
+        remaining = remaining.saturating_sub(chunk);
+    }
 }
 
 fn load_valid_tags(conn: &Connection) -> Result<HashSet<String>> {

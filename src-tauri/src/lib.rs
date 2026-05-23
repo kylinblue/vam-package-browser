@@ -1,4 +1,5 @@
 mod commands;
+mod commands_classifier;
 pub mod deps;
 pub mod embedding;
 pub mod fsutil;
@@ -81,6 +82,12 @@ pub struct AppState {
     /// Set while a sync is running. Survives frontend HMR reloads so the
     /// reloaded UI can detect "sync is continuing in the background".
     pub hub_sync_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancel flag for the in-app tagging run (mirrors hub_sync_cancel).
+    pub tagging_cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub tagging_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancel flag for the in-app embedding run.
+    pub embedding_cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub embedding_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -109,6 +116,10 @@ pub fn run() {
                 data_dir,
                 hub_sync_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 hub_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                tagging_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                tagging_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                embedding_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                embedding_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
 
             // Embedding model warm-up shelved alongside the Ask UI — pulling
@@ -179,6 +190,17 @@ pub fn run() {
             commands::rename_preset,
             commands::list_creators_for_packages,
             commands::list_favorite_package_ids,
+            commands_classifier::tagging_status,
+            commands_classifier::embedding_status,
+            commands_classifier::set_xai_api_key,
+            commands_classifier::clear_xai_api_key,
+            commands_classifier::tagging_active,
+            commands_classifier::embedding_active,
+            commands_classifier::start_tagging_run,
+            commands_classifier::stop_tagging_run,
+            commands_classifier::start_embedding_run,
+            commands_classifier::stop_embedding_run,
+            commands_classifier::recompute_families,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
