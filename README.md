@@ -69,8 +69,8 @@ scripts\dev-env.cmd npm run tauri build
 
 The exe lands at `src-tauri\target\release\vam-package-browser.exe` — copy it
 anywhere and run it. (Release builds use LTO and take a while; that's
-expected. A portable zip of the same exe is also produced by the
-[CI release workflow](.github/workflows/release.yml) for tagged versions.)
+expected.) Releases on GitHub are source-only: download a tagged source
+archive and build it the same way.
 
 ## First run
 

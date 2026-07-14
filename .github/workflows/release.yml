@@ -1,15 +1,13 @@
-# Builds the Windows executable and publishes it to a GitHub Release.
+# Cuts a source-only release: no prebuilt binaries are distributed.
+# Users build the app themselves via run-dev.bat (see README).
 #
 # Trigger: push a tag like `v0.1.0` (or run manually via workflow_dispatch,
-# which builds and uploads workflow artifacts without creating a release).
+# which runs the build check without creating a release).
 #
-# One artifact per release:
-#   - vam-package-browser-portable-windows-x64.zip — the bare exe + any
-#     runtime DLLs cargo dropped next to it (WebView2 loader, onnxruntime).
-#     No installer; unzip and run.
-#
-# Note: the release profile uses lto=true + codegen-units=1, so a cold
-# build takes a while (~20-40 min). rust-cache keeps warm runs shorter.
+# The job compiles the frontend (tsc + vite) and type-checks the Rust
+# backend (cargo check) so a tag never points at source that doesn't
+# build — then drafts a GitHub Release whose only artifacts are the
+# auto-generated "Source code (zip / tar.gz)" archives.
 
 name: Release
 
@@ -23,7 +21,7 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
+  verify-and-release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,32 +40,22 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      - name: Build Tauri app (exe only, no bundler)
-        run: npm run tauri build -- --no-bundle
+      - name: Build frontend (tsc + vite)
+        run: npm run build
 
-      - name: Stage portable zip
-        shell: pwsh
-        run: |
-          $rel = "src-tauri/target/release"
-          $stage = New-Item -ItemType Directory -Path "portable-stage"
-          Copy-Item "$rel/vam-package-browser.exe" "$($stage.FullName)/VaM Package Browser.exe"
-          # Runtime DLLs, if the build produced any (e.g. onnxruntime for
-          # the embedding pipeline). Harmless when none exist.
-          Get-ChildItem "$rel" -Filter "*.dll" -File -ErrorAction SilentlyContinue |
-            Copy-Item -Destination $stage.FullName
-          Compress-Archive -Path "$($stage.FullName)/*" `
-            -DestinationPath "vam-package-browser-portable-windows-x64.zip"
+      - name: Check Rust backend
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
-      - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build
-          path: vam-package-browser-portable-windows-x64.zip
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (source only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true
-          files: vam-package-browser-portable-windows-x64.zip
+          body: |
+            Source-only release — no prebuilt binaries. Download the source
+            archive below (or clone the repo), then build and run with
+            `run-dev.bat` as described in the README.
