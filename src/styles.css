@@ -1384,10 +1384,11 @@ html, body, #root {
   color: var(--fg);
 }
 
-/* ---- ClassifierPane ("Tagged" mode) ---- */
+/* ---- ClassifierPane (Advanced mode, Tags toggle on) ---- */
 
 /* Mirrors HubSyncView's toolbar placement: lives inside the .toolbar block,
-   shown only when viewMode === "tagged". Compact single-row layout for the
+   shown only in Advanced mode with the Tags toggle on. Compact single-row
+   layout for the
    common case (counts + buttons); collapsible sub-rows for the API key
    form, advanced overrides, and live progress. */
 .classifier-pane {

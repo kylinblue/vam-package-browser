@@ -54,10 +54,13 @@ import { TagChips } from "./TagChips";
 interface Props {
   packageId: number;
   thumbVersion: number;
-  /** Classification source the user has picked in the toolbar. Controls
-   *  which metadata sections render (Tags only in "tagged" mode; hub data
-   *  will render in "fetched" mode once the hub-pivot milestone lands). */
-  viewMode: "simple" | "tagged" | "fetched";
+  /** Classification source the user has picked in the toolbar. Advanced
+   *  renders the hub metadata sections; Simple sticks to the local
+   *  heuristic axis. */
+  viewMode: "simple" | "advanced";
+  /** Whether the v4 tag layer is mounted (Advanced mode + Tags toggle).
+   *  Gates the Tags section so the mixed-quality LLM tags stay opt-in. */
+  showTags: boolean;
   onClose: () => void;
   onFilterByAuthor: (author: string) => void;
   onFilterByType: (type: string) => void;
@@ -107,6 +110,7 @@ export function DetailView({
   packageId,
   thumbVersion,
   viewMode,
+  showTags,
   onClose,
   onFilterByAuthor,
   onFilterByType,
@@ -414,7 +418,7 @@ export function DetailView({
                   onActionResult={onActionResult}
                 />
 
-                {viewMode === "tagged" && tags.length > 0 && (
+                {showTags && tags.length > 0 && (
                   <section>
                     <h4>Tags</h4>
                     <TagChips tags={tags} />
@@ -553,11 +557,11 @@ function HubInfoSection({
   onActionResult,
 }: {
   pkg: PackageRow;
-  viewMode: "simple" | "tagged" | "fetched";
+  viewMode: "simple" | "advanced";
   onReload: () => void;
   onActionResult: (msg: ToastMessage) => void;
 }) {
-  const isFetched = viewMode === "fetched";
+  const isAdvanced = viewMode === "advanced";
   const isMatched = pkg.hub_resource_id != null;
   const isOffsite = pkg.hub_is_hub_hosted === 0;
   const tier = pkg.hub_billing_tier ?? "free";
@@ -569,15 +573,15 @@ function HubInfoSection({
         : "Free";
 
   // The "Override category/type" button consolidates two backend axes
-  // under one slot: in Fetched mode it sets hub_category (the axis driving
-  // the toolbar's HubCategoryChips); in Simple/Tagged it sets the local
-  // heuristic package_type (the axis driving TypeChips). One button, two
-  // commands, picked per current view.
-  const classifyLabel = isFetched ? "Override category…" : "Override type…";
-  const classifyOptions: readonly string[] = isFetched
+  // under one slot: in Advanced mode it sets hub_category (the axis driving
+  // the toolbar's HubCategoryChips); in Simple it sets the local heuristic
+  // package_type (the axis driving TypeChips). One button, two commands,
+  // picked per current view.
+  const classifyLabel = isAdvanced ? "Override category…" : "Override type…";
+  const classifyOptions: readonly string[] = isAdvanced
     ? HUB_CATEGORIES
     : PACKAGE_TYPES;
-  const classifyCurrent = isFetched
+  const classifyCurrent = isAdvanced
     ? pkg.hub_category ?? "Scenes"
     : pkg.package_type;
 
@@ -595,12 +599,12 @@ function HubInfoSection({
 
   // Keep the dropdown's initial selection in sync with the current axis
   // when the user flips viewMode while the section is mounted (e.g.
-  // opening DetailView in Simple then switching to Fetched).
+  // opening DetailView in Simple then switching to Advanced).
   useEffect(() => {
     setClassifyDraft(classifyCurrent);
     setShowClassify(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFetched, pkg.package_type, pkg.hub_category]);
+  }, [isAdvanced, pkg.package_type, pkg.hub_category]);
 
   async function handlePin() {
     if (!pinUrl.trim() || busy) return;
@@ -657,7 +661,7 @@ function HubInfoSection({
     setBusy("classify");
     try {
       let msg: string;
-      if (isFetched) {
+      if (isAdvanced) {
         const report = await setHubCategory([pkg.id], classifyDraft);
         const sib = report.siblings_updated;
         msg =
@@ -680,8 +684,8 @@ function HubInfoSection({
             : `Set type to ${classifyDraft}. Scanner will preserve this on rescan.`;
       }
       const pkgId = pkg.id;
-      const revertField: OverrideField = isFetched ? "category" : "type";
-      const revertLabel = isFetched ? "Category override reverted." : "Type override reverted.";
+      const revertField: OverrideField = isAdvanced ? "category" : "type";
+      const revertLabel = isAdvanced ? "Category override reverted." : "Type override reverted.";
       onActionResult({
         kind: "ok",
         text: msg,
@@ -702,7 +706,7 @@ function HubInfoSection({
     } catch (e) {
       onActionResult({
         kind: "error",
-        text: `${isFetched ? "Category" : "Type"} override error: ${e}`,
+        text: `${isAdvanced ? "Category" : "Type"} override error: ${e}`,
       });
     } finally {
       setBusy(null);
@@ -777,8 +781,8 @@ function HubInfoSection({
 
   return (
     <section className="detail-hub-info">
-      <h4>{isFetched ? "Hub" : "Overrides"}</h4>
-      {isFetched &&
+      <h4>{isAdvanced ? "Hub" : "Overrides"}</h4>
+      {isAdvanced &&
         (isMatched ? (
           <>
             <div className="detail-hub-title">
@@ -859,7 +863,7 @@ function HubInfoSection({
       )}
 
       <div className="detail-action-row">
-        {isFetched && pkg.hub_url && (
+        {isAdvanced && pkg.hub_url && (
           <button
             type="button"
             className="detail-action"
@@ -868,7 +872,7 @@ function HubInfoSection({
             Open on hub
           </button>
         )}
-        {isFetched && isOffsite && pkg.hub_external_url && (
+        {isAdvanced && isOffsite && pkg.hub_external_url && (
           <button
             type="button"
             className="detail-action"
@@ -878,7 +882,7 @@ function HubInfoSection({
             Buy at source ↗
           </button>
         )}
-        {isFetched && (
+        {isAdvanced && (
           <>
             <button
               type="button"
@@ -918,23 +922,23 @@ function HubInfoSection({
             setShowAuthor(false);
           }}
           title={
-            isFetched
+            isAdvanced
               ? "Override the hub_category for this package — protected from auto-sync overwrites"
               : "Override the local package_type — kept across rescans, propagates to sibling versions"
           }
         >
           {classifyLabel}
         </button>
-        {((isFetched && pkg.hub_category_manual === 1) ||
-          (!isFetched && pkg.package_type_manual === 1)) && (
+        {((isAdvanced && pkg.hub_category_manual === 1) ||
+          (!isAdvanced && pkg.package_type_manual === 1)) && (
           <button
             type="button"
             className="detail-action detail-action-restore"
             onClick={() =>
-              handleClearOverride(isFetched ? "category" : "type")
+              handleClearOverride(isAdvanced ? "category" : "type")
             }
             title={
-              isFetched
+              isAdvanced
                 ? "Release the category lock — auto-sync may overwrite hub_category on next pass."
                 : "Release the type lock — scanner may reclassify on next rescan."
             }

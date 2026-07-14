@@ -80,20 +80,36 @@ export default function App() {
     loadTileDim("tileSize", 200),
   );
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  // Three-mode classification source selector:
-  //   - "simple"  : heuristic package_type only, no extra metadata UI
-  //   - "tagged"  : v4 LLM tag layer (TagChips + FacetPanel). Tag quality is
-  //                 mixed, so this is currently an opt-in inspection mode.
-  //   - "fetched" : hub-scraped metadata (category, billing tier, etc.).
-  //                 Wires up in milestone 3 of the hub pivot.
-  // Persists in localStorage. Old `facetPanelOpen` key is read once for a
-  // soft migration: anyone who had the panel open lands in "tagged" mode.
-  const [viewMode, setViewMode] = useState<"simple" | "tagged" | "fetched">(() => {
+  // Two-mode classification source selector:
+  //   - "simple"   : heuristic package_type only, no extra metadata UI.
+  //                  Zero-setup, one-click browsing.
+  //   - "advanced" : hub-scraped metadata (category chips, billing tier,
+  //                  ghost-dimming) plus the optional v4 LLM tag layer
+  //                  behind the Tags toggle (`tagsPanelOpen` below).
+  // Persists in localStorage. The old tri-state ("simple"/"tagged"/
+  // "fetched") migrates softly: both non-simple values land in
+  // "advanced"; "tagged" additionally seeds the Tags toggle on (see
+  // tagsPanelOpen's initializer, which must read the *old* stored value
+  // before our persist effect overwrites it). The ancient
+  // `facetPanelOpen` key gets the same treatment.
+  const [viewMode, setViewMode] = useState<"simple" | "advanced">(() => {
     const stored = localStorage.getItem("viewMode");
-    if (stored === "simple" || stored === "tagged" || stored === "fetched") {
-      return stored;
-    }
-    return localStorage.getItem("facetPanelOpen") === "1" ? "tagged" : "simple";
+    if (stored === "simple" || stored === "advanced") return stored;
+    if (stored === "tagged" || stored === "fetched") return "advanced";
+    return localStorage.getItem("facetPanelOpen") === "1" ? "advanced" : "simple";
+  });
+  // Tags toggle inside Advanced mode — mounts FacetPanel + ClassifierPane
+  // and lets selectedTags reach the backend query. Off by default: tag
+  // quality is mixed (v4 LLM output), so the layer stays opt-in.
+  const [tagsPanelOpen, setTagsPanelOpen] = useState<boolean>(() => {
+    const stored = localStorage.getItem("tagsPanelOpen");
+    if (stored === "1" || stored === "0") return stored === "1";
+    // One-time migration: users who lived in the old Tagged mode keep
+    // their tag UI mounted on first launch of the two-mode layout.
+    return (
+      localStorage.getItem("viewMode") === "tagged" ||
+      localStorage.getItem("facetPanelOpen") === "1"
+    );
   });
   const [statsPanelVisible, setStatsPanelVisible] = useState<boolean>(
     () => localStorage.getItem("statsPanelVisible") === "1",
@@ -287,6 +303,10 @@ export default function App() {
   }, [viewMode]);
 
   useEffect(() => {
+    localStorage.setItem("tagsPanelOpen", tagsPanelOpen ? "1" : "0");
+  }, [tagsPanelOpen]);
+
+  useEffect(() => {
     localStorage.setItem("statsPanelVisible", statsPanelVisible ? "1" : "0");
   }, [statsPanelVisible]);
 
@@ -320,6 +340,7 @@ export default function App() {
         noThumb: missingPreview,
         err: errorsOnly,
         view: viewMode,
+        tagsOpen: tagsPanelOpen,
       }),
     [
       debouncedSearch,
@@ -333,6 +354,7 @@ export default function App() {
       missingPreview,
       errorsOnly,
       viewMode,
+      tagsPanelOpen,
     ],
   );
 
@@ -482,31 +504,35 @@ export default function App() {
         // covers everything modified on that calendar day.
         max_mtime: dateStringToUnixEnd(maxDate),
         // Translate the UI-only "category" sort intent to the actual backend
-        // column based on viewMode: Fetched shows the hub_category badge so
+        // column based on viewMode: Advanced shows the hub_category badge so
         // sort by hub_category (which already holds the effective value —
         // user override if set, auto-matched original otherwise — see
-        // build_order_clause in commands.rs); Simple/Tagged show the
-        // heuristic package_type so sort by that.
+        // build_order_clause in commands.rs); Simple shows the heuristic
+        // package_type so sort by that.
         sort_by:
           sortBy === "category"
-            ? viewMode === "fetched"
+            ? viewMode === "advanced"
               ? "hub_category"
               : "package_type"
             : sortBy,
         sort_order: sortOrder,
         limit: 10000,
-        // Only push tag filter when in tagged mode — otherwise switching
-        // away from Tagged would leave an invisible filter applied. The
-        // selection is preserved in state, so switching back restores it.
-        tags: viewMode === "tagged" && selectedTags.length > 0 ? selectedTags : undefined,
-        // Hub category filter is only relevant in fetched mode.
+        // Only push tag filter when the tag layer is mounted (Advanced +
+        // Tags toggle) — otherwise flipping the toggle or dropping back to
+        // Simple would leave an invisible filter applied. The selection is
+        // preserved in state, so toggling back restores it.
+        tags:
+          viewMode === "advanced" && tagsPanelOpen && selectedTags.length > 0
+            ? selectedTags
+            : undefined,
+        // Hub category filter is only relevant in Advanced mode.
         hub_category:
-          viewMode === "fetched" && selectedHubCategory !== null
+          viewMode === "advanced" && selectedHubCategory !== null
             ? selectedHubCategory
             : undefined,
-        // "(unidentified)" virtual chip: also fetched-mode-only.
+        // "(unidentified)" virtual chip: also Advanced-mode-only.
         hub_unmatched:
-          viewMode === "fetched" && unidentifiedSelected ? true : undefined,
+          viewMode === "advanced" && unidentifiedSelected ? true : undefined,
       };
       const [rows, total] = await Promise.all([
         queryPackages(filter),
@@ -537,6 +563,7 @@ export default function App() {
     selectedHubCategory,
     unidentifiedSelected,
     viewMode,
+    tagsPanelOpen,
   ]);
 
   const refreshTypeCountsAndCreators = useCallback(async () => {
@@ -682,7 +709,7 @@ export default function App() {
   }, [loadResults]);
 
   // Keep `hubCategoryCounts` (the chip-bar aggregate) in sync with the
-  // backing DB while we're in Fetched mode. Without this, a running hub
+  // backing DB while we're in Advanced mode. Without this, a running hub
   // sync can populate fresh hub_category values on packages that the chip
   // bar doesn't know about — then any path that calls setSelectedHubCategory
   // with one of those new values (most commonly the StatsPanel category
@@ -692,7 +719,7 @@ export default function App() {
   // chip in HubCategoryChips covers the worst case, but this keeps the
   // chip-bar counts honest between filter activations as well.
   useEffect(() => {
-    if (viewMode !== "fetched") return;
+    if (viewMode !== "advanced") return;
     listHubCategories()
       .then(setHubCategoryCounts)
       .catch(() => {});
@@ -872,34 +899,39 @@ export default function App() {
               aria-checked={viewMode === "simple"}
               className={`seg-btn ${viewMode === "simple" ? "active" : ""}`}
               onClick={() => setViewMode("simple")}
-              title="Heuristic package_type only — no tag UI, no hub data."
+              title="Heuristic package_type only — zero setup, works out of the box."
             >
               Simple
             </button>
             <button
               type="button"
               role="radio"
-              aria-checked={viewMode === "tagged"}
-              className={`seg-btn ${viewMode === "tagged" ? "active" : ""}`}
-              onClick={() => setViewMode("tagged")}
-              title="LLM-derived v4 tags. Mixed quality — inspection mode."
+              aria-checked={viewMode === "advanced"}
+              className={`seg-btn ${viewMode === "advanced" ? "active" : ""}`}
+              onClick={() => setViewMode("advanced")}
+              title="Hub-scraped metadata (categories, tiers) plus the optional tag layer."
             >
-              Tagged{selectedTags.length > 0 && ` (${selectedTags.length})`}
-            </button>
-            <button
-              type="button"
-              role="radio"
-              aria-checked={viewMode === "fetched"}
-              className={`seg-btn ${viewMode === "fetched" ? "active" : ""}`}
-              onClick={() => setViewMode("fetched")}
-              title="Hub-scraped metadata. Wires up in the hub-pivot milestone."
-            >
-              Fetched
+              Advanced
             </button>
           </div>
+          {viewMode === "advanced" && (
+            <label
+              className="toolbar-toggle"
+              title="v4 LLM tag layer — facet sidebar + classifier controls. Mixed quality; opt-in. Selected tags only filter the grid while this is on."
+            >
+              <input
+                type="checkbox"
+                checked={tagsPanelOpen}
+                onChange={(e) => setTagsPanelOpen(e.target.checked)}
+              />
+              <span>
+                🏷 Tags{selectedTags.length > 0 && ` (${selectedTags.length})`}
+              </span>
+            </label>
+          )}
         </div>
 
-        {viewMode === "fetched" ? (
+        {viewMode === "advanced" ? (
           <HubCategoryChips
             counts={hubCategoryCounts}
             selected={selectedHubCategory}
@@ -1044,10 +1076,10 @@ export default function App() {
               <option value="scanned:desc">Added newest</option>
               <option value="scanned:asc">Added oldest</option>
               <option value="category:asc">
-                {viewMode === "fetched" ? "Hub category A→Z" : "Type A→Z"}
+                {viewMode === "advanced" ? "Hub category A→Z" : "Type A→Z"}
               </option>
               <option value="category:desc">
-                {viewMode === "fetched" ? "Hub category Z→A" : "Type Z→A"}
+                {viewMode === "advanced" ? "Hub category Z→A" : "Type Z→A"}
               </option>
             </select>
           </label>
@@ -1160,11 +1192,11 @@ export default function App() {
           </span>
         </div>
 
-        {/* Hub sync controls live inside the toolbar in Fetched mode so the
+        {/* Hub sync controls live inside the toolbar in Advanced mode so the
             collapsed handle sits flush with the rest of the filter UI.
-            Classifier controls do the same for Tagged mode. */}
-        {viewMode === "fetched" && <HubSyncView />}
-        {viewMode === "tagged" && (
+            Classifier controls do the same when the Tags toggle is on. */}
+        {viewMode === "advanced" && <HubSyncView />}
+        {viewMode === "advanced" && tagsPanelOpen && (
           <ClassifierPane
             refreshNonce={classifierStatusNonce}
             onRunComplete={() => {
@@ -1177,7 +1209,7 @@ export default function App() {
       </div>
 
       <div className="content-area">
-        {viewMode === "tagged" && (
+        {viewMode === "advanced" && tagsPanelOpen && (
           <FacetPanel
             key={facetRefreshNonce}
             selectedTags={selectedTags}
@@ -1188,7 +1220,7 @@ export default function App() {
           packages={visiblePackages}
           thumbVersions={thumbVersions}
           tileSize={tileSize}
-          displayMode={viewMode === "fetched" ? "hub" : "heuristic"}
+          displayMode={viewMode === "advanced" ? "hub" : "heuristic"}
           onToggleFavorite={onToggleFavorite}
           onToggleHidden={onToggleHidden}
           onOpenDetail={setDetailPackageId}
@@ -1224,6 +1256,7 @@ export default function App() {
           packageId={detailPackageId}
           thumbVersion={thumbVersions[detailPackageId] ?? 0}
           viewMode={viewMode}
+          showTags={viewMode === "advanced" && tagsPanelOpen}
           onClose={() => setDetailPackageId(null)}
           onFilterByAuthor={(a) => {
             setSelectedCreator(a);

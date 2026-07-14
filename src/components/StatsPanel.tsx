@@ -6,7 +6,7 @@ interface Props {
   /** True when totalMatched > packages.length (backend limit clip). */
   truncated: boolean;
   totalMatched: number;
-  viewMode: "simple" | "tagged" | "fetched";
+  viewMode: "simple" | "advanced";
   selectedType: PackageType | null;
   selectedCreator: string;
   selectedHubCategory: string | null;
@@ -179,7 +179,7 @@ export function StatsPanel({
 
   // ── Aggregation ─────────────────────────────────────────────────────────
   const stats = useMemo(() => {
-    const useHub = viewMode === "fetched";
+    const useHub = viewMode === "advanced";
     const typeCounts = new Map<string, number>();
     let typeNullCount = 0;
     const authorCounts = new Map<string, number>();
@@ -306,7 +306,7 @@ export function StatsPanel({
 
   // ── Click handlers ──────────────────────────────────────────────────────
   function handleTypeClick(key: string) {
-    if (viewMode === "fetched") {
+    if (viewMode === "advanced") {
       const next = selectedHubCategory === key ? null : key;
       applyAndPush({
         type: selectedType,
@@ -338,7 +338,7 @@ export function StatsPanel({
     selectedType !== null || selectedCreator !== "" || selectedHubCategory !== null;
 
   const typeSelectedKey =
-    viewMode === "fetched" ? selectedHubCategory : selectedType;
+    viewMode === "advanced" ? selectedHubCategory : selectedType;
   const authorsToShow = stats.authors.slice(0, authorLimit);
   const remainingAuthors = Math.max(0, stats.authors.length - authorLimit);
   const showStep20 = remainingAuthors > 0;
@@ -405,7 +405,7 @@ export function StatsPanel({
       </div>
 
       <StatsSection
-        title={viewMode === "fetched" ? "By hub category" : "By type"}
+        title={viewMode === "advanced" ? "By hub category" : "By type"}
         rows={stats.types}
         total={stats.n}
         selectedKey={typeSelectedKey}

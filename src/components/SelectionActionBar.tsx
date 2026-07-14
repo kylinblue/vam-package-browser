@@ -62,10 +62,10 @@ interface Props {
    *  this is empty the action buttons are disabled and the bar acts as
    *  a permanent entry point for select mode. */
   selection: number[];
-  /** Drives the classify action — hub_category in Fetched mode, the
-   *  local heuristic package_type in Simple/Tagged. Same UI slot, mode
-   *  picks the backend command and the option list. */
-  viewMode: "simple" | "tagged" | "fetched";
+  /** Drives the classify action — hub_category in Advanced mode, the
+   *  local heuristic package_type in Simple. Same UI slot, mode picks
+   *  the backend command and the option list. */
+  viewMode: "simple" | "advanced";
   /** Select-mode toggle moved into the bar (used to live in the
    *  toolbar). Off = tile clicks open the detail view, on = tile
    *  clicks toggle selection. Modifier-driven select (Ctrl / Shift)
@@ -104,9 +104,9 @@ export function SelectionActionBar({
   onSelectAllVisible,
   visibleCount,
 }: Props) {
-  const isFetched = viewMode === "fetched";
-  const classifyLabel = isFetched ? "Override category…" : "Override type…";
-  const classifyOptions: readonly string[] = isFetched
+  const isAdvanced = viewMode === "advanced";
+  const classifyLabel = isAdvanced ? "Override category…" : "Override type…";
+  const classifyOptions: readonly string[] = isAdvanced
     ? HUB_CATEGORIES
     : PACKAGE_TYPES;
 
@@ -115,7 +115,7 @@ export function SelectionActionBar({
   >("closed");
   const [pinUrl, setPinUrl] = useState("");
   const [classifyDraft, setClassifyDraft] = useState<string>(
-    isFetched ? "Scenes" : "Scene",
+    isAdvanced ? "Scenes" : "Scene",
   );
   const [authorDraft, setAuthorDraft] = useState("");
   const [busy, setBusy] = useState<
@@ -125,10 +125,10 @@ export function SelectionActionBar({
   // Re-seed the draft + close the form on mode flip so the dropdown
   // doesn't carry a stale value from the previous mode's option list.
   useEffect(() => {
-    setClassifyDraft(isFetched ? "Scenes" : "Scene");
+    setClassifyDraft(isAdvanced ? "Scenes" : "Scene");
     if (mode === "classify") setMode("closed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFetched]);
+  }, [isAdvanced]);
 
   function reset() {
     setMode("closed");
@@ -193,7 +193,7 @@ export function SelectionActionBar({
     setBusy("classify");
     try {
       let msg: string;
-      if (isFetched) {
+      if (isAdvanced) {
         const report: CategoryReport = await setHubCategory(
           selection,
           classifyDraft,
@@ -227,8 +227,8 @@ export function SelectionActionBar({
               }. Scanner will preserve this on rescan.`;
       }
       const revertIds = [...selection];
-      const revertField: OverrideField = isFetched ? "category" : "type";
-      const revertLabel = isFetched
+      const revertField: OverrideField = isAdvanced ? "category" : "type";
+      const revertLabel = isAdvanced
         ? "Category override reverted."
         : "Type override reverted.";
       onActionResult({
@@ -250,7 +250,7 @@ export function SelectionActionBar({
     } catch (e) {
       onActionResult({
         kind: "error",
-        text: `${isFetched ? "Category" : "Type"} override error: ${e}`,
+        text: `${isAdvanced ? "Category" : "Type"} override error: ${e}`,
       });
     } finally {
       setBusy(null);
@@ -394,7 +394,7 @@ export function SelectionActionBar({
           title={
             !hasSelection
               ? "Select at least one tile first"
-              : isFetched
+              : isAdvanced
                 ? "Override hub_category for selected packages — protected from auto-sync overwrites"
                 : "Override the local heuristic package_type — kept across rescans, propagates to sibling versions"
           }
