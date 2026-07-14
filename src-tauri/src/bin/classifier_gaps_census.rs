@@ -214,8 +214,5 @@ fn bucket_report(conn: &Connection, label: &str, where_clause: &str) -> Result<(
 }
 
 fn default_db_path() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    PathBuf::from(appdata)
-        .join("com.github.kylinblue.vam-package-browser")
-        .join("index.sqlite")
+    vam_package_browser_lib::paths::default_db_path()
 }

@@ -45,10 +45,7 @@ struct Args {
 }
 
 fn default_db_path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_default();
-    PathBuf::from(base)
-        .join("com.github.kylinblue.vam-package-browser")
-        .join("index.sqlite")
+    vam_package_browser_lib::paths::default_db_path()
 }
 
 fn parse_args() -> Result<Args> {

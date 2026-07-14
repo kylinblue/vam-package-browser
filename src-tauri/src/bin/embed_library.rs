@@ -276,10 +276,7 @@ fn needs_value<'a>(raw: &'a [String], i: usize, flag: &str) -> Result<&'a str> {
 }
 
 fn default_db_path() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    PathBuf::from(appdata)
-        .join("com.github.kylinblue.vam-package-browser")
-        .join("index.sqlite")
+    vam_package_browser_lib::paths::default_db_path()
 }
 
 fn print_status(conn: &rusqlite::Connection) -> Result<()> {

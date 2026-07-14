@@ -257,10 +257,7 @@ fn main() -> Result<()> {
 }
 
 fn default_db_path() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    PathBuf::from(appdata)
-        .join("com.github.kylinblue.vam-package-browser")
-        .join("index.sqlite")
+    vam_package_browser_lib::paths::default_db_path()
 }
 
 /// Pick up to `n` packages of `ty`, spreading across creators via ROW_NUMBER()

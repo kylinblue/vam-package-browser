@@ -37,7 +37,12 @@ def normalize(s: str) -> str:
 
 
 def default_db_path() -> Path:
-    return Path(os.environ["APPDATA"]) / "com.github.kylinblue.vam-package-browser" / "index.sqlite"
+    base = Path(os.environ["APPDATA"])
+    current = base / "com.github.kylinblue.vam-package-browser" / "index.sqlite"
+    if current.exists():
+        return current
+    legacy = base / "com.github.kylinblue.vam-package-browser" / "index.sqlite"
+    return legacy if legacy.exists() else current
 
 
 def parse_args() -> argparse.Namespace:
