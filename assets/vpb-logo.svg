@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c2534"/>
+      <stop offset="1" stop-color="#0c1017"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="streakL" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0.9"/>
+    </linearGradient>
+    <linearGradient id="streakL2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#818cf8" stop-opacity="0"/>
+      <stop offset="1" stop-color="#818cf8" stop-opacity="0.75"/>
+    </linearGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="8" y="8" width="496" height="496" rx="100" fill="url(#bg)"/>
+  <rect x="10" y="10" width="492" height="492" rx="98" fill="none" stroke="#2e3d55" stroke-width="4"/>
+
+  <!-- gallery thumbnails accelerating in from the left (motion-blur trail) -->
+  <g>
+    <g opacity="0.18"><rect x="58"  y="102" width="58" height="58" rx="12" fill="#38bdf8"/><rect x="92" y="176" width="58" height="58" rx="12" fill="#818cf8"/></g>
+    <g opacity="0.38"><rect x="136" y="102" width="58" height="58" rx="12" fill="#38bdf8"/><rect x="170" y="176" width="58" height="58" rx="12" fill="#818cf8"/></g>
+    <g opacity="0.75"><rect x="214" y="102" width="58" height="58" rx="12" fill="#38bdf8"/><rect x="248" y="176" width="58" height="58" rx="12" fill="#818cf8"/></g>
+    <!-- lead tile: crisp, with a tiny "image" glyph = the browser's thumbnail -->
+    <rect x="292" y="102" width="58" height="58" rx="12" fill="url(#accent)"/>
+    <circle cx="309" cy="119" r="6" fill="#0c1017" opacity="0.85"/>
+    <path d="M298 150 l14 -16 l10 11 l8 -9 l14 14 z" fill="#0c1017" opacity="0.85"/>
+    <rect x="326" y="176" width="58" height="58" rx="12" fill="url(#accent)" opacity="0.95"/>
+  </g>
+
+  <!-- speed streaks trailing the wordmark -->
+  <rect x="40" y="306" width="128" height="13" rx="6.5" fill="url(#streakL)"/>
+  <rect x="66" y="342" width="150" height="13" rx="6.5" fill="url(#streakL2)"/>
+  <rect x="46" y="378" width="96"  height="13" rx="6.5" fill="url(#streakL)" opacity="0.55"/>
+
+  <!-- ghost echo of the wordmark (motion) -->
+  <g transform="translate(40,290) scale(0.866)" opacity="0.16">
+    <path d="M33.0,0.0 L70.9,0.0 L85.8,107.6 L148.1,0.0 L185.9,0.0 L99.8,145.8 L55.0,145.8 L33.0,0.0 Z M205.2,0.0 L267.6,0.0 Q295.5,0.0 307.6,12.4 Q319.8,24.7 314.8,47.6 Q309.7,70.5 292.1,82.9 Q274.5,95.2 246.7,95.2 L221.9,95.2 L210.8,145.8 L173.2,145.8 L205.2,0.0 Z M236.8,27.2 L227.9,68.0 L248.7,68.0 Q259.6,68.0 266.7,62.7 Q273.9,57.3 276.0,47.6 Q278.2,37.8 273.4,32.5 Q268.6,27.2 257.6,27.2 L236.8,27.2 Z M397.8,56.5 Q406.7,56.5 412.1,52.6 Q417.6,48.7 419.2,41.0 Q420.9,33.5 417.2,29.6 Q413.5,25.6 404.6,25.6 L383.8,25.6 L377.0,56.5 L397.8,56.5 Z M385.0,120.2 Q396.3,120.2 403.1,115.4 Q409.9,110.7 412.0,101.0 Q414.1,91.5 409.5,86.8 Q404.9,82.0 393.4,82.0 L371.4,82.0 L363.0,120.2 L385.0,120.2 Z M431.5,67.8 Q442.9,71.3 447.4,80.8 Q452.0,90.2 448.9,104.0 Q444.3,125.1 427.8,135.5 Q411.2,145.8 382.1,145.8 L319.7,145.8 L351.8,0.0 L408.3,0.0 Q438.6,0.0 450.2,9.2 Q461.8,18.4 457.4,38.6 Q455.1,49.2 448.4,56.7 Q441.8,64.2 431.5,67.8 Z" fill="#38bdf8"/>
+  </g>
+  <!-- VPB wordmark, baked outlines -->
+  <g transform="translate(58,290) scale(0.866)">
+    <path d="M33.0,0.0 L70.9,0.0 L85.8,107.6 L148.1,0.0 L185.9,0.0 L99.8,145.8 L55.0,145.8 L33.0,0.0 Z M205.2,0.0 L267.6,0.0 Q295.5,0.0 307.6,12.4 Q319.8,24.7 314.8,47.6 Q309.7,70.5 292.1,82.9 Q274.5,95.2 246.7,95.2 L221.9,95.2 L210.8,145.8 L173.2,145.8 L205.2,0.0 Z M236.8,27.2 L227.9,68.0 L248.7,68.0 Q259.6,68.0 266.7,62.7 Q273.9,57.3 276.0,47.6 Q278.2,37.8 273.4,32.5 Q268.6,27.2 257.6,27.2 L236.8,27.2 Z M397.8,56.5 Q406.7,56.5 412.1,52.6 Q417.6,48.7 419.2,41.0 Q420.9,33.5 417.2,29.6 Q413.5,25.6 404.6,25.6 L383.8,25.6 L377.0,56.5 L397.8,56.5 Z M385.0,120.2 Q396.3,120.2 403.1,115.4 Q409.9,110.7 412.0,101.0 Q414.1,91.5 409.5,86.8 Q404.9,82.0 393.4,82.0 L371.4,82.0 L363.0,120.2 L385.0,120.2 Z M431.5,67.8 Q442.9,71.3 447.4,80.8 Q452.0,90.2 448.9,104.0 Q444.3,125.1 427.8,135.5 Q411.2,145.8 382.1,145.8 L319.7,145.8 L351.8,0.0 L408.3,0.0 Q438.6,0.0 450.2,9.2 Q461.8,18.4 457.4,38.6 Q455.1,49.2 448.4,56.7 Q441.8,64.2 431.5,67.8 Z" fill="url(#accent)"/>
+  </g>
+</svg>
