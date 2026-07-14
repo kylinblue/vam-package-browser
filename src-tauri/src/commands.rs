@@ -1371,7 +1371,18 @@ fn sync_one_creator_inner(
             hub::DownloadProbe::Hosted { filename } => {
                 if let Some((c, p, _v)) = parse_var_filename(&filename) {
                     let key = norm_key(&c, &p);
-                    filename_map.insert(key, (hr, None));
+                    let new_id = hr.resource_id;
+                    if let Some((prev, _)) = filename_map.insert(key, (hr, None)) {
+                        // Two hub resources report the same canonical
+                        // Creator.Package filename (re-upload / v1-v2 split
+                        // resources). Last insert wins — log so the audit
+                        // trail shows which candidate got shadowed.
+                        eprintln!(
+                            "hub sync B1: filename-key collision for {filename}: \
+                             resource {new_id} shadowed earlier candidate {} ({})",
+                            prev.resource_id, prev.title,
+                        );
+                    }
                 } else {
                     eprintln!(
                         "unparseable .var filename from CDN: {filename} (res {})",
@@ -1869,6 +1880,18 @@ fn retry_one_keyword(
     // burning ~22 s/local for low-yield checks. The cap matters most for
     // generic fallback tokens whose result set can be 80+ rows.
     const MAX_HEAD_PROBES: usize = 15;
+    if hits.len() > MAX_HEAD_PROBES {
+        // Silent-recall guard: rows that miss because the right resource
+        // sat past the probe cap are otherwise indistinguishable from
+        // genuinely unmatchable rows in the DB. Make the drop visible so
+        // the not_found audit can attribute this miss mode.
+        eprintln!(
+            "hub sync B2: {}.{}: probing top {MAX_HEAD_PROBES} of {} candidates (cap hit)",
+            local.creator,
+            local.package_name,
+            hits.len(),
+        );
+    }
     for hr in hits.into_iter().take(MAX_HEAD_PROBES) {
         if cancel.load(Ordering::Relaxed) {
             return false;
@@ -1884,6 +1907,11 @@ fn retry_one_keyword(
                         sleep_with_cancel(rate_limit_ms, cancel);
                         break;
                     }
+                } else {
+                    eprintln!(
+                        "hub sync B2: unparseable .var filename from CDN: {filename} (res {})",
+                        hr.resource_id
+                    );
                 }
             }
             Ok(hub::DownloadProbe::Offsite { url }) => {

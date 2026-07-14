@@ -23,10 +23,12 @@
 //!    normalization. No other hub_* fields propagate at this tier — they
 //!    are per-resource, not per-author.
 //!
-//! Inherited rows are subject to background verification (see the
-//! verification queue in commands.rs) — a HEAD probe confirms the .var
-//! filename actually matches the resource. On mismatch the inherited
-//! fields are wiped and the row falls back to NULL.
+//! Inherited rows are NOT independently verified at propagation time.
+//! They get re-checked only when a subsequent hub sync runs: the
+//! `only_missing` queue in commands.rs explicitly re-includes rows with
+//! `hub_match_method = 'inherit'`, and the sync's filename pass then
+//! either confirms the inherited resource_id or overwrites it with the
+//! correct match. There is no standing background verification queue.
 
 use anyhow::Result;
 use rusqlite::{params, Connection};

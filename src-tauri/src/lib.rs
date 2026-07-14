@@ -4,7 +4,7 @@ pub mod deps;
 pub mod embedding;
 pub mod fsutil;
 pub mod holdout;
-mod hub;
+pub mod hub;
 pub mod index;
 pub mod materialize;
 pub mod meta;

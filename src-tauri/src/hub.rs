@@ -131,6 +131,22 @@ impl HubClient {
         )
     }
 
+    /// Global keyword search — no `c[users]` author filter. Used by the
+    /// not_found audit tool to approximate "would a human searching the hub
+    /// find this?" independent of creator-name mismatches. `max_pages`
+    /// caps pagination the same way as the per-user variant.
+    pub fn search_resources_global(
+        &self,
+        keyword: &str,
+        max_pages: Option<u32>,
+    ) -> Result<Vec<HubMatch>> {
+        self.perform_search(
+            &[("keywords", keyword)],
+            &format!("q={keyword}"),
+            max_pages,
+        )
+    }
+
     /// Shared XF search workflow:
     ///   1. GET /search/ for the CSRF token.
     ///   2. POST /search/search with `_xfToken` + `type=resource` + provided fields.
