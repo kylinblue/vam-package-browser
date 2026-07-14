@@ -27,6 +27,16 @@ node_modules/
 classifier-review-sample.md
 
 # ---------------------------------------------------------------------------
+# Personal-library data — audit CSVs and tagging samples/prompts are derived
+# from the local .var collection and stay out of the public repo.
+# (tagging/taxonomy-*.json stays tracked — it's configuration, not data.)
+# ---------------------------------------------------------------------------
+docs/audits/
+tagging/calibration/
+tagging/pilot/
+tagging/pilot-v4/
+
+# ---------------------------------------------------------------------------
 # Environment files (allow example template through)
 # ---------------------------------------------------------------------------
 .env

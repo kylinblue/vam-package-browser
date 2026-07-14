@@ -13,9 +13,24 @@ rem vswhere is used by tauri's build script to locate VS; not on PATH by default
 set "VSWHERE_DIR=C:\Program Files (x86)\Microsoft Visual Studio\Installer"
 if exist "%VSWHERE_DIR%\vswhere.exe" set "PATH=%VSWHERE_DIR%;%PATH%"
 
-set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-if not exist "%VCVARS%" (
-    echo dev-env.cmd: vcvars64.bat not found at "%VCVARS%"
+rem Locate vcvars64.bat: prefer vswhere (finds any VS edition/version with
+rem the C++ toolset), fall back to known install paths.
+set "VCVARS="
+if exist "%VSWHERE_DIR%\vswhere.exe" (
+    for /f "usebackq tokens=*" %%i in (`"%VSWHERE_DIR%\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find VC\Auxiliary\Build\vcvars64.bat`) do set "VCVARS=%%i"
+)
+if not defined VCVARS (
+    for %%p in (
+        "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+    ) do if not defined VCVARS if exist %%p set "VCVARS=%%~p"
+)
+if not defined VCVARS (
+    echo dev-env.cmd: could not find vcvars64.bat. Install Visual Studio Build
+    echo Tools with the "Desktop development with C++" workload, then retry.
     exit /b 2
 )
 

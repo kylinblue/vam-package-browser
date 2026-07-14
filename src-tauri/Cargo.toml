@@ -2,6 +2,7 @@
 name = "vam-package-browser"
 version = "0.1.0"
 description = "Local visual browser/indexer for VaM .var packages"
+license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.75"
 # Multiple binaries (main GUI + export_sample + tag_library) — `cargo run`
