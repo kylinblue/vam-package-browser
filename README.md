@@ -33,6 +33,18 @@ folder — see [Where your data lives](#where-your-data-lives).
   MSVC toolchain), and Visual Studio Build Tools with the
   **"Desktop development with C++"** workload.
 
+### A note on performance
+
+The app is built to handle very large libraries (thousands of `.var`
+packages), but the heavy lifting — scanning archives and generating
+thumbnails — is real work for your CPU and disk. On a multi-core machine
+with the library on an SSD, a multi-thousand-package scan takes minutes;
+on a slow HDD or a low-core CPU, expect the first scan and thumbnail pass
+to take considerably longer. This cost is paid once: after that, browsing
+only reads the SQLite index and cached thumbnails and stays fast even on
+modest hardware. The thumbnail cache also consumes disk space in
+proportion to library size (small WebP files, but they add up).
+
 ## Getting started
 
 There are no prepackaged downloads — you build and run the app from source.
