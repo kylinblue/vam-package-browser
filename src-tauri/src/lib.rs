@@ -106,9 +106,6 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("app_data_dir resolves on desktop");
-            // One-time carry-over from the pre-rename identifier's data dir
-            // (the-old-identifier.*). No-op on fresh or already-migrated installs.
-            paths::migrate_legacy_data_dir(&data_dir);
             std::fs::create_dir_all(&data_dir).expect("create app data dir");
 
             let db_path = data_dir.join("index.sqlite");

@@ -119,9 +119,6 @@ index and thumbnail cache manually:
    Remove-Item -Recurse -Force "$env:APPDATA\com.github.kylinblue.vam-package-browser"
    ```
 
-   (Installs from before 2026-07 may also have a
-   `com.github.kylinblue.vam-package-browser` folder — the script cleans up both.)
-
 Your `.var` files are untouched either way. One caveat: if you previously ran
 the "Set up library…" wizard, purging also forgets which packages were
 hardlinked into the active folder. No files are lost (the managed folder

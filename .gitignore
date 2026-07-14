@@ -12,6 +12,7 @@ dist/
 # Dependencies
 # ---------------------------------------------------------------------------
 node_modules/
+__pycache__/
 
 # ---------------------------------------------------------------------------
 # Local model / data caches (re-downloadable; do NOT commit)

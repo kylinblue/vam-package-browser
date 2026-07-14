@@ -10,12 +10,6 @@ def main() -> None:
     db = os.path.join(
         os.environ["APPDATA"], "com.github.kylinblue.vam-package-browser", "index.sqlite"
     )
-    if not os.path.exists(db):
-        legacy = os.path.join(
-            os.environ["APPDATA"], "com.github.kylinblue.vam-package-browser", "index.sqlite"
-        )
-        if os.path.exists(legacy):
-            db = legacy
     c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 
     overall = c.execute(
