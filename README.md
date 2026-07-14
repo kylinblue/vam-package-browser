@@ -28,11 +28,8 @@ folder — see [Where your data lives](#where-your-data-lives).
 - Microsoft Edge WebView2 runtime (preinstalled on Windows 11 and most
   up-to-date Windows 10 systems).
 - A Virt-A-Mate `AddonPackages` folder full of `.var` files.
-- Build tools (you build the app yourself — see below):
-  [Node.js](https://nodejs.org) 20+, [Rust](https://rustup.rs) (stable,
-  MSVC toolchain), and Visual Studio Build Tools with the
-  **"Desktop development with C++"** workload. **`setup.bat` installs any
-  of these that are missing** — you don't need to fetch them yourself.
+- (Only if building from source) build tools: `setup.bat` installs any
+  that are missing — see below.
 
 ### A note on performance
 
@@ -48,30 +45,37 @@ proportion to library size (small WebP files, but they add up).
 
 ## Getting started
 
-There are no prepackaged downloads — you build and run the app from source.
+Download `vam-package-browser-portable-windows-x64.zip` from the latest
+entry on the [Releases page](../../releases), unzip it anywhere, and run
+`VaM Package Browser.exe`. No installer, no admin rights; app data goes to
+`%APPDATA%` (see below).
 
-1. Get the source: `git clone` this repo, or download and unzip a source
-   archive from the Releases page.
-2. **Double-click `setup.bat`.** It checks for Node.js, the C++ Build Tools,
-   and Rust, installs whatever is missing via `winget`, and runs
-   `npm install`. If everything is already present it finishes in seconds;
-   if the VS Build Tools need installing, expect a multi-GB download.
+The exe is not code-signed, so Windows SmartScreen may show an
+"unrecognized app" warning on first launch — click "More info" → "Run
+anyway", or build from source instead if you'd rather not run an unsigned
+binary.
+
+### Building from source (alternative)
+
+1. Get the source: `git clone` this repo, or grab a source archive from the
+   Releases page.
+2. **Double-click `setup.bat`.** It checks for the toolchain (Node.js, the
+   VS C++ Build Tools, Rust), installs whatever is missing via `winget`,
+   and runs `npm install`. If everything is already present it finishes in
+   seconds; if the VS Build Tools need installing, expect a multi-GB
+   download.
 3. **Double-click `run-dev.bat`** (from a new terminal/Explorer window if
-   setup just installed something). It locates your toolchain and launches
-   the app. The first build compiles the Rust backend and takes several
-   minutes; later launches are fast.
+   setup just installed something). It launches the app in dev mode; the
+   first build takes several minutes.
 
-If you'd rather have a standalone optimized exe instead of running through
-`run-dev.bat` each time:
+For a standalone optimized exe like the released one:
 
 ```powershell
 scripts\dev-env.cmd npm run tauri build
 ```
 
-The exe lands at `src-tauri\target\release\vam-package-browser.exe` — copy it
-anywhere and run it. (Release builds use LTO and take a while; that's
-expected.) Releases on GitHub are source-only: download a tagged source
-archive and build it the same way.
+It lands at `src-tauri\target\release\vam-package-browser.exe`. (Release
+builds use LTO and take a while; that's expected.)
 
 ## First run
 

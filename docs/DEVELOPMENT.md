@@ -206,11 +206,12 @@ Releases are built by GitHub Actions
 1. Bump `version` in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`,
    and `package.json` (keep them in sync).
 2. Commit, tag `v<version>`, push the tag.
-3. The workflow verifies the tagged source builds (frontend `tsc`+`vite`,
-   `cargo check --all-targets`, `cargo test`) and drafts a **source-only**
-   release — the only downloads are GitHub's auto-generated source archives.
-   Review and publish the draft by hand. No binaries are distributed; the
-   documented install path is building from source via `run-dev.bat`.
+3. The workflow builds on `windows-latest` (`tauri build --no-bundle`) and
+   attaches a portable zip — the exe plus any runtime DLLs — to a **draft**
+   release. Review and publish it by hand. No installer is produced.
 
-`workflow_dispatch` runs the same build check without creating a release,
-useful for validating the pipeline.
+`workflow_dispatch` runs the same build without creating a release
+(artifacts only), useful for validating the pipeline.
+
+Historical note: v0.1.0 and v0.1.1 were source-only releases (no binary
+attached); the portable-zip pipeline starts at v0.1.2.
