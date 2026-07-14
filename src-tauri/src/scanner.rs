@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 use zip::ZipArchive;
 
 use crate::deps;
+use crate::fsutil;
 use crate::meta::{self, PackageMeta, PackageType, PreviewableCounts};
 use crate::tagging::family;
 
@@ -280,7 +281,7 @@ fn parse_one(path: &Path) -> ScannedPackage {
     };
 
     match result {
-        Ok((meta, entries, package_mtime)) => {
+        Ok((mut meta, entries, package_mtime)) => {
             // Classify on contentList (author's official content list — best
             // for type intent). Pick preview & count items from the entry
             // list (catches files hidden behind directory-style contentList
@@ -289,6 +290,25 @@ fn parse_one(path: &Path) -> ScannedPackage {
             let ty = meta::classify(&meta.content_list);
             let preview_path = meta::pick_preview(&entries);
             let counts = meta::previewable_counts(&entries);
+
+            // Merge in any extra dep keys from the .var.depend.txt sidecar.
+            // meta.json is author-declared; the sidecar is VaM's runtime
+            // resolution and is often a superset (it captures dynamically
+            // discovered deps the author didn't enumerate). The bulk
+            // insert uses INSERT OR IGNORE so dupes are cheap, but we
+            // dedup here too for cleanliness.
+            let sidecar_keys = read_sidecar_dep_keys(path);
+            if !sidecar_keys.is_empty() {
+                use std::collections::HashSet;
+                let existing: HashSet<String> =
+                    meta.dependencies.iter().cloned().collect();
+                for k in sidecar_keys {
+                    if !existing.contains(&k) {
+                        meta.dependencies.push(k);
+                    }
+                }
+            }
+
             ScannedPackage {
                 var_path: path.to_path_buf(),
                 file_size,
@@ -472,6 +492,48 @@ fn strip_utf8_bom(buf: &[u8]) -> &[u8] {
     }
 }
 
+/// Read `<var_path>.var.depend.txt` (VaM's runtime-resolved dep sidecar)
+/// and return the dep keys it lists. Format: one entry per line, first
+/// whitespace-separated token is the `Author.Package.Version` key. The
+/// rest of the line is author/license/link metadata we ignore.
+///
+/// Returns an empty Vec on any failure (file missing, unreadable,
+/// malformed) — sidecars are a best-effort augmentation, never load-
+/// critical. Caller treats absent and empty identically.
+fn read_sidecar_dep_keys(var_path: &Path) -> Vec<String> {
+    const MAX_BYTES: u64 = 1 * 1024 * 1024;
+    let sidecar = fsutil::sidecar_path(var_path);
+    let md = match std::fs::metadata(&sidecar) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    if md.len() > MAX_BYTES {
+        return Vec::new();
+    }
+    let body = match std::fs::read_to_string(&sidecar) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let token = trimmed.split_whitespace().next().unwrap_or("");
+        if token.is_empty() {
+            continue;
+        }
+        // Cheap sanity check: dep keys are Author.Package.Version, all
+        // ASCII, no whitespace. Reject obvious junk (comment lines,
+        // headers, etc.) without trying to fully validate.
+        if token.contains('.') {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
 fn stat(path: &Path) -> Option<(i64, i64)> {
     let md = std::fs::metadata(path).ok()?;
     let size = md.len() as i64;
@@ -509,5 +571,80 @@ fn parse_version_from_filename(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let last_dot = stem.rfind('.')?;
     Some(stem[last_dot + 1..].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn sidecar_parser_extracts_first_token_per_line() {
+        let tmp = TempDir::new().unwrap();
+        let var = tmp.path().join("Alice.Foo.1.var");
+        std::fs::write(&var, b"fake var").unwrap();
+        // Real-world sample: dep key + padding + "By: ..." metadata.
+        let body = "\
+AcidBubbles.Embody.58                         By: AcidBubbles  License: CC BY-SA  Link: https://github.com/acidbubbles/vam-embody
+AcidBubbles.Timeline.214                      By: AcidBubbles  License: CC BY-SA
+everlaster.TittyMagic.35                      By: everlaster   License: PC EA
+everlaster.TittyMagic.9                       By: everlaster   License: CC BY-SA
+hazmhox.vamlaunch.2                           By: hazmhox      License: FC
+
+   \t  \n\
+LFE.SoundtrackSync0.4                         By: LFE          License: CC BY-SA
+TGC.Clothing_Ravenous_SecretVenusNo3.latest   By: TGC          License: CC BY-SA
+";
+        std::fs::write(
+            tmp.path().join("Alice.Foo.1.var.depend.txt"),
+            body.as_bytes(),
+        )
+        .unwrap();
+
+        let keys = read_sidecar_dep_keys(&var);
+        assert_eq!(
+            keys,
+            vec![
+                "AcidBubbles.Embody.58",
+                "AcidBubbles.Timeline.214",
+                "everlaster.TittyMagic.35",
+                "everlaster.TittyMagic.9",
+                "hazmhox.vamlaunch.2",
+                "LFE.SoundtrackSync0.4",
+                "TGC.Clothing_Ravenous_SecretVenusNo3.latest",
+            ],
+            "should pull the first whitespace token from every non-empty line"
+        );
+    }
+
+    #[test]
+    fn sidecar_parser_returns_empty_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let var = tmp.path().join("Alice.Foo.1.var");
+        std::fs::write(&var, b"fake var").unwrap();
+        let keys = read_sidecar_dep_keys(&var);
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn sidecar_parser_rejects_lines_without_dots() {
+        // Defensive: header / comment lines that lack the
+        // Author.Package.Version dot structure are skipped.
+        let tmp = TempDir::new().unwrap();
+        let var = tmp.path().join("Alice.Foo.1.var");
+        std::fs::write(&var, b"fake var").unwrap();
+        std::fs::write(
+            tmp.path().join("Alice.Foo.1.var.depend.txt"),
+            b"# This is a header\nAcidBubbles.Embody.58\nGARBAGE\nReal.Pkg.1\n",
+        )
+        .unwrap();
+
+        let keys = read_sidecar_dep_keys(&var);
+        // "# This is a header" -> "#" -> no dot, rejected
+        // "AcidBubbles.Embody.58" -> kept
+        // "GARBAGE" -> no dot, rejected
+        // "Real.Pkg.1" -> kept
+        assert_eq!(keys, vec!["AcidBubbles.Embody.58", "Real.Pkg.1"]);
+    }
 }
 

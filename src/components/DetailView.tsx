@@ -73,6 +73,11 @@ interface Props {
    *  or failed override / pin / category / author write here; App shows
    *  the toast and (on success) refreshes the grid + aggregates. */
   onActionResult: (msg: ToastMessage) => void;
+  /** Whether this package is currently materialized in the active
+   *  folder. Drives the Load/Unload button label. */
+  isActive: boolean;
+  onLoadPackage: (id: number) => void;
+  onUnloadPackage: (id: number) => void;
 }
 
 function formatSize(bytes: number): string {
@@ -108,6 +113,9 @@ export function DetailView({
   onFilterByHubCategory,
   onOpenPackage: _onOpenPackage,
   onActionResult,
+  isActive,
+  onLoadPackage,
+  onUnloadPackage,
 }: Props) {
   const [detail, setDetail] = useState<PackageDetail | null>(null);
   const [relationships, setRelationships] =
@@ -424,6 +432,21 @@ export function DetailView({
                     {pkg.var_path}
                   </div>
                   <div className="detail-action-row">
+                    <button
+                      onClick={() =>
+                        isActive
+                          ? onUnloadPackage(pkg.id)
+                          : onLoadPackage(pkg.id)
+                      }
+                      className="detail-action detail-action-primary"
+                      title={
+                        isActive
+                          ? "Remove this package's hardlink from the active folder. Dependents/dependencies left alone."
+                          : "Hardlink this package (and its dependency closure) into the active folder."
+                      }
+                    >
+                      {isActive ? "Unload" : "Load"}
+                    </button>
                     <button
                       onClick={() => revealInFolder(pkg.var_path)}
                       className="detail-action"

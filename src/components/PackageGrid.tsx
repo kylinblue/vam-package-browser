@@ -60,6 +60,13 @@ interface Props {
   selectionMode: boolean;
   selectedIds: Set<number>;
   onToggleSelect: (id: number, additive: boolean, range: boolean) => void;
+  /** Package ids currently materialized in the active folder. Drives the
+   *  Load/Unload context-menu entry on each tile. Empty pre-setup or
+   *  before the first refresh — that's fine, every tile just shows
+   *  "Load" until the first refresh lands. */
+  activePackageIds: Set<number>;
+  onLoadPackage: (id: number) => void;
+  onUnloadPackage: (id: number) => void;
 }
 
 function formatSize(bytes: number): string {
@@ -92,6 +99,9 @@ export function PackageGrid({
   selectionMode,
   selectedIds,
   onToggleSelect,
+  activePackageIds,
+  onLoadPackage,
+  onUnloadPackage,
 }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -192,6 +202,9 @@ export function PackageGrid({
                   selectionMode={selectionMode}
                   isSelected={selectedIds.has(pkg.id)}
                   onToggleSelect={onToggleSelect}
+                  isActive={activePackageIds.has(pkg.id)}
+                  onLoadPackage={onLoadPackage}
+                  onUnloadPackage={onUnloadPackage}
                 />
               ))}
             </div>
@@ -234,6 +247,11 @@ interface TileProps {
   selectionMode: boolean;
   isSelected: boolean;
   onToggleSelect: (id: number, additive: boolean, range: boolean) => void;
+  /** True when this package is in `active_folder_state` — flips the
+   *  context-menu entry from "Load" to "Unload". */
+  isActive: boolean;
+  onLoadPackage: (id: number) => void;
+  onUnloadPackage: (id: number) => void;
 }
 
 function Tile({
@@ -249,6 +267,9 @@ function Tile({
   selectionMode,
   isSelected,
   onToggleSelect,
+  isActive,
+  onLoadPackage,
+  onUnloadPackage,
 }: TileProps) {
   const filename = pkg.var_path.split(/[\\/]/).pop() ?? pkg.var_path;
   // Hub-mode display rules:
@@ -318,6 +339,12 @@ function Tile({
         {
           label: "Open details…",
           onClick: () => onOpenDetail(pkg.id),
+        },
+        { label: "", onClick: () => {}, divider: true },
+        {
+          label: isActive ? "Unload from active folder" : "Load into active folder",
+          onClick: () =>
+            isActive ? onUnloadPackage(pkg.id) : onLoadPackage(pkg.id),
         },
         { label: "", onClick: () => {}, divider: true },
         {

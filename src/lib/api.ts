@@ -464,6 +464,47 @@ export async function unloadAll(): Promise<LoadResult> {
   return invoke<LoadResult>("unload_all");
 }
 
+/** Additive load: materialize `closure(seeds) \ current` without
+ *  removing anything already loaded. Use this for right-click → Load
+ *  and the additive seed-by-author path. Idempotent. */
+export async function loadVisibilityAdditive(
+  seeds: SeedSpec,
+): Promise<LoadResult> {
+  return invoke<LoadResult>("load_visibility_additive", { seeds });
+}
+
+/** Targeted unload: remove the hardlinks for `packageIds` that are in
+ *  the active folder. Ids not currently loaded are silently no-ops. */
+export async function unloadPackages(
+  packageIds: number[],
+): Promise<LoadResult> {
+  return invoke<LoadResult>("unload_packages", { packageIds });
+}
+
+/** All package ids currently materialized in the active folder. Drives
+ *  the per-card Load/Unload state. Re-fetch after every load/unload. */
+export async function listActivePackageIds(): Promise<number[]> {
+  return invoke<number[]>("list_active_package_ids");
+}
+
+/** A `.var` found in `addon_root` that the package manager doesn't own
+ *  — almost always a Hub download that VaM dropped there after setup.
+ *  Surfaced as a warning so the user can integrate it into the managed
+ *  library (reconcile flow is a follow-up; for now we just warn). */
+export interface UnmanagedFile {
+  path: string;
+  size_bytes: number;
+  /** Unix seconds. 0 when stat failed. */
+  mtime: number;
+  is_directory_package: boolean;
+}
+
+/** Post-setup only. Pre-setup `addon_root` *is* the library, so the
+ *  concept doesn't apply and the call returns an empty list. */
+export async function listUnmanagedAddonFiles(): Promise<UnmanagedFile[]> {
+  return invoke<UnmanagedFile[]>("list_unmanaged_addon_files");
+}
+
 /** Read-only health check on `active_folder_state` vs the filesystem.
  *  Reports stale rows. Caller decides whether to fix via `loadVisibility`
  *  (which is self-healing on re-call). */

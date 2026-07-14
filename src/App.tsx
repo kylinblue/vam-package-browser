@@ -27,6 +27,9 @@ import {
   setFavorite,
   setHidden,
   verifyActiveFolder,
+  listActivePackageIds,
+  loadVisibilityAdditive,
+  unloadPackages,
   type CreatorCount,
   type HubCategoryCount,
   type PackageRow,
@@ -263,6 +266,12 @@ export default function App() {
   // setup commit, and after every LoadVisibilityModal close.
   const [activeFolderCount, setActiveFolderCount] = useState<number | null>(
     null,
+  );
+  // Which packages are currently materialized — drives the per-card
+  // Load/Unload context-menu entry and the DetailView toggle. Refreshed
+  // in lockstep with `activeFolderCount`.
+  const [activePackageIds, setActivePackageIds] = useState<Set<number>>(
+    () => new Set(),
   );
 
   // Batch thumb-progress events so we don't re-render per-image.
@@ -561,6 +570,12 @@ export default function App() {
       } catch {
         setActiveFolderCount(null);
       }
+      try {
+        const ids = await listActivePackageIds();
+        setActivePackageIds(new Set(ids));
+      } catch {
+        setActivePackageIds(new Set());
+      }
     } catch {
       /* pre-scan: settings may not be set */
     }
@@ -572,6 +587,16 @@ export default function App() {
   // update live. No child needs to know about loadResults / aggregate
   // refresh anymore. Each toast gets a unique id so the user (or its
   // own auto-dismiss timer) can dismiss it without disturbing siblings.
+  const refreshActivePackages = useCallback(async () => {
+    try {
+      const ids = await listActivePackageIds();
+      setActivePackageIds(new Set(ids));
+      setActiveFolderCount(ids.length);
+    } catch {
+      /* non-fatal — UI just stays on the previous snapshot */
+    }
+  }, []);
+
   const handleActionResult = useCallback(
     (msg: ToastMessage) => {
       const id = ++toastSeqRef.current;
@@ -579,9 +604,56 @@ export default function App() {
       if (msg.kind === "ok") {
         loadResults();
         refreshTypeCountsAndCreators();
+        // Any action *might* have touched the active folder (load/unload
+        // toggles, preset apply). Cheap query; refresh unconditionally
+        // rather than threading a hint through every action site.
+        refreshActivePackages();
       }
     },
-    [loadResults, refreshTypeCountsAndCreators],
+    [loadResults, refreshTypeCountsAndCreators, refreshActivePackages],
+  );
+
+  // Right-click "Load" / DetailView Load button. Additive — won't kick
+  // out anything already materialized. Emits a toast on the shared sink.
+  const onLoadPackage = useCallback(
+    async (id: number) => {
+      try {
+        const res = await loadVisibilityAdditive({
+          creators: [],
+          package_ids: [id],
+        });
+        const closureCount = res.added + res.kept;
+        const detail =
+          closureCount > 1
+            ? ` (+${res.added - 1} dep${res.added - 1 === 1 ? "" : "s"})`
+            : "";
+        handleActionResult({
+          kind: "ok",
+          text: res.added > 0 ? `Loaded${detail}` : "Already loaded",
+        });
+      } catch (e) {
+        handleActionResult({ kind: "error", text: `Load failed: ${e}` });
+      }
+    },
+    [handleActionResult],
+  );
+
+  // Right-click "Unload" / DetailView Unload button. Removes only this
+  // package's hardlink — dependents/dependencies are left alone (the
+  // user can re-run a preset if they want a full reconcile).
+  const onUnloadPackage = useCallback(
+    async (id: number) => {
+      try {
+        const res = await unloadPackages([id]);
+        handleActionResult({
+          kind: "ok",
+          text: res.removed > 0 ? "Unloaded" : "Not loaded",
+        });
+      } catch (e) {
+        handleActionResult({ kind: "error", text: `Unload failed: ${e}` });
+      }
+    },
+    [handleActionResult],
   );
 
   // Bootstrap.
@@ -1126,6 +1198,9 @@ export default function App() {
           selectionMode={selectionMode}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
+          activePackageIds={activePackageIds}
+          onLoadPackage={onLoadPackage}
+          onUnloadPackage={onUnloadPackage}
         />
         {statsPanelVisible && (
           <StatsPanel
@@ -1164,6 +1239,9 @@ export default function App() {
           }}
           onOpenPackage={setDetailPackageId}
           onActionResult={handleActionResult}
+          isActive={activePackageIds.has(detailPackageId)}
+          onLoadPackage={onLoadPackage}
+          onUnloadPackage={onUnloadPackage}
         />
       )}
 

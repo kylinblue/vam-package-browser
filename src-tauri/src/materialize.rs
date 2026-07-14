@@ -174,6 +174,118 @@ pub fn unload_all(conn: &mut Connection) -> Result<LoadResult> {
     load(conn, &SeedSpec::default())
 }
 
+/// Additive sibling of `load`: hardlink in `closure(target_seeds) \ current`
+/// without touching anything that's already in `active_folder_state`.
+///
+/// Use this for "load these too" flows — right-click → Load, or "seed by
+/// author" when the user wants to *grow* the visible set instead of
+/// reconciling to exactly the author's closure. Per-package errors
+/// surface in `LoadResult.errors`; `removed` is always 0.
+pub fn load_additive(
+    conn: &mut Connection,
+    target_seeds: &SeedSpec,
+) -> Result<LoadResult> {
+    let start = Instant::now();
+    let (addon_root, managed_root) = read_roots(conn)?;
+    same_volume_or_bail(&addon_root, &managed_root)?;
+
+    let closure_ids = crate::visibility::compute_closure(conn, target_seeds)?;
+    let target: HashSet<i64> = closure_ids.iter().copied().collect();
+    let current = read_active_state(conn)?;
+    let current_ids: HashSet<i64> = current.keys().copied().collect();
+
+    let mut to_add: Vec<i64> = target.difference(&current_ids).copied().collect();
+    to_add.sort();
+    let kept = target.intersection(&current_ids).count() as i64;
+
+    let source_paths = read_var_paths(conn, &to_add)?;
+    let mut errors: Vec<LoadError> = Vec::new();
+    let mut added: i64 = 0;
+
+    if !to_add.is_empty() {
+        let now = unix_now();
+        let tx = conn.transaction()?;
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO active_folder_state (package_id, active_path, materialized_at)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for id in &to_add {
+                match link_one(&addon_root, &managed_root, &source_paths, *id) {
+                    Ok(dest_str) => {
+                        ins.execute(params![*id, dest_str, now])?;
+                        added += 1;
+                    }
+                    Err(e) => errors.push(e),
+                }
+            }
+        }
+        tx.commit()?;
+    }
+
+    Ok(LoadResult {
+        added,
+        removed: 0,
+        kept,
+        errors,
+        elapsed_ms: start.elapsed().as_millis(),
+    })
+}
+
+/// Targeted unload: remove the hardlinks for `package_ids` that are
+/// currently in `active_folder_state`. Ids not in the ledger are silently
+/// ignored — "unload" is idempotent on already-unloaded ids.
+///
+/// `kept` reports rows in `active_folder_state` left untouched (not the
+/// closure-derived `kept` from `load`). `added` is always 0.
+pub fn unload_packages(
+    conn: &mut Connection,
+    package_ids: &[i64],
+) -> Result<LoadResult> {
+    let start = Instant::now();
+    let (addon_root, _managed_root) = read_roots(conn)?;
+
+    let current = read_active_state(conn)?;
+    let mut to_remove: Vec<(i64, String)> = package_ids
+        .iter()
+        .filter_map(|id| current.get(id).map(|p| (*id, p.clone())))
+        .collect();
+    to_remove.sort_by_key(|(id, _)| *id);
+    let kept = (current.len() as i64) - (to_remove.len() as i64);
+
+    let mut errors: Vec<LoadError> = Vec::new();
+    let mut removed: i64 = 0;
+
+    if !to_remove.is_empty() {
+        let tx = conn.transaction()?;
+        {
+            let mut del = tx.prepare("DELETE FROM active_folder_state WHERE package_id = ?1")?;
+            for (id, active_path) in &to_remove {
+                match unlink_one(&addon_root, Path::new(active_path)) {
+                    Ok(()) => {
+                        del.execute(params![*id])?;
+                        removed += 1;
+                    }
+                    Err(e) => errors.push(LoadError {
+                        package_id: *id,
+                        path: active_path.clone(),
+                        reason: e.to_string(),
+                    }),
+                }
+            }
+        }
+        tx.commit()?;
+    }
+
+    Ok(LoadResult {
+        added: 0,
+        removed,
+        kept,
+        errors,
+        elapsed_ms: start.elapsed().as_millis(),
+    })
+}
+
 /// Dry-run for the load-visibility modal: closure preview + diff
 /// against the current `active_folder_state`. Lets the UI render
 /// "+A / −R / =K" before the user commits, without doing the FS work
@@ -220,6 +332,129 @@ pub struct LoadPlan {
     pub will_remove: i64,
     /// Packages already correctly materialized — no FS touch needed.
     pub will_keep: i64,
+}
+
+/// One unmanaged `.var` file or directory found under `addon_root` —
+/// i.e. something the user's package manager doesn't own. Most often
+/// these are Hub-downloaded packages that VaM dropped into AddonPackages
+/// after the visibility-presets setup migrated everything else into
+/// `managed_root`. They're outside the active_folder_state ledger, so
+/// `load`/`unload_all` correctly leave them alone — but they also won't
+/// appear in the grid (the scanner walks managed_root post-setup) and
+/// can block hardlinks at conflicting paths the next time the user
+/// loads a preset.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnmanagedFile {
+    pub path: String,
+    pub size_bytes: u64,
+    pub mtime: i64,
+    pub is_directory_package: bool,
+}
+
+/// Walk `addon_root` post-setup and return every `.var` entry that
+/// isn't tracked in `active_folder_state`. Pure read-only — never
+/// writes to the library. Pre-setup the active folder *is* the library,
+/// so the concept doesn't apply; returns Ok(empty) without scanning.
+///
+/// Skips files modified in the last `mid_download_grace_secs` seconds
+/// to avoid surfacing a Hub download that VaM is still writing to. The
+/// caller can pass 0 to disable that filter (useful in tests).
+pub fn list_unmanaged_addon_files(
+    conn: &Connection,
+    mid_download_grace_secs: i64,
+) -> Result<Vec<UnmanagedFile>> {
+    use walkdir::WalkDir;
+
+    let setup_complete = index::get_setting(conn, setup::SETTING_SETUP_COMPLETE)?
+        .as_deref()
+        == Some("1");
+    if !setup_complete {
+        return Ok(Vec::new());
+    }
+    let addon_root = index::get_setting(conn, "addon_root")?
+        .ok_or_else(|| anyhow!("addon_root not set"))?;
+    let addon_root_path = PathBuf::from(&addon_root);
+    if !addon_root_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    // Set of active paths normalized for case-insensitive Windows
+    // comparison. active_path is whatever `link_one` wrote — always an
+    // absolute path under addon_root.
+    let known: HashSet<String> = {
+        let mut stmt = conn.prepare("SELECT active_path FROM active_folder_state")?;
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|p| normalize(Path::new(&p)))
+            .collect()
+    };
+
+    let now = unix_now();
+    let cutoff = now - mid_download_grace_secs.max(0);
+
+    let mut out = Vec::new();
+    let mut it = WalkDir::new(&addon_root_path).into_iter();
+    while let Some(entry) = it.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let ext_is_var = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("var"))
+            .unwrap_or(false);
+        if !ext_is_var {
+            continue;
+        }
+        let ft = entry.file_type();
+        let is_directory_package = ft.is_dir();
+        if !ft.is_file() && !is_directory_package {
+            continue;
+        }
+        if is_directory_package {
+            it.skip_current_dir();
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        let key = normalize(path);
+        if known.contains(&key) {
+            continue;
+        }
+
+        let (size_bytes, mtime) = match entry.metadata() {
+            Ok(m) => {
+                let size = if is_directory_package { 0 } else { m.len() };
+                let mt = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                (size, mt)
+            }
+            Err(_) => (0, 0),
+        };
+
+        // Skip likely-in-flight Hub downloads. A directory package never
+        // counts as in-flight (no .var.tmp -> .var rename pattern).
+        if !is_directory_package && mtime > cutoff {
+            continue;
+        }
+
+        out.push(UnmanagedFile {
+            path: path_str,
+            size_bytes,
+            mtime,
+            is_directory_package,
+        });
+    }
+
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
 }
 
 /// Walk every row in `active_folder_state` and report which entries are
@@ -446,6 +681,30 @@ fn link_one(
         });
     }
 
+    // Bring the .var.depend.txt sidecar along if it exists. VaM uses it
+    // for fast dep resolution at load time, so the active folder needs
+    // it next to the .var. Best-effort: a missing or failing sidecar
+    // never aborts the load — VaM will regenerate it on next package
+    // load anyway. We don't track it in active_folder_state; its
+    // lifecycle is implicit from the .var's lifecycle (unlink_one
+    // removes the destination sidecar when the .var goes away).
+    let sidecar_src = fsutil::sidecar_path(&source);
+    if sidecar_src.exists() {
+        let sidecar_dst = fsutil::sidecar_path(&dest);
+        // Skip if a sidecar is already there (e.g. retry after partial
+        // failure). hard_link fails on existing dest, so this avoids a
+        // spurious "AlreadyExists" warning in the common idempotent path.
+        if !sidecar_dst.exists() {
+            if let Err(e) = std::fs::hard_link(&sidecar_src, &sidecar_dst) {
+                eprintln!(
+                    "materialize: sidecar hardlink failed for {} → {}: {e}",
+                    sidecar_src.display(),
+                    sidecar_dst.display()
+                );
+            }
+        }
+    }
+
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -538,6 +797,20 @@ fn unlink_one(addon_root: &Path, active_path: &Path) -> Result<()> {
     } else {
         std::fs::remove_file(active_path)
     };
+
+    // Remove the sidecar too. Best-effort: a missing sidecar is the
+    // expected case (VaM only writes one once it loads the package);
+    // a permission/lock failure here doesn't abort the unlink.
+    let sidecar = fsutil::sidecar_path(active_path);
+    match std::fs::remove_file(&sidecar) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!(
+            "materialize: sidecar remove failed for {}: {e}",
+            sidecar.display()
+        ),
+    }
+
     match result {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1045,5 +1318,88 @@ mod tests {
         assert_eq!(res.removed, 1);
         assert_eq!(res.errors.len(), 0);
         assert_eq!(active_paths(&conn).len(), 0);
+    }
+
+    #[test]
+    fn load_hardlinks_sidecar_alongside_var() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_pkg(&managed, &conn, 1, "Alice", "Foo");
+        // Plant a sidecar next to the managed-side .var.
+        let sidecar_src = managed.join("Alice.Foo.1.var.depend.txt");
+        std::fs::write(
+            &sidecar_src,
+            b"Bob.Dep.3                  By: Bob   License: CC BY-SA\n",
+        )
+        .unwrap();
+
+        let res = load(
+            &mut conn,
+            &SeedSpec {
+                creators: vec!["Alice".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(res.added, 1, "errors: {:?}", res.errors);
+
+        // Both .var and sidecar appear on the addon side.
+        let var_dst = addon.join("Alice.Foo.1.var");
+        let sidecar_dst = addon.join("Alice.Foo.1.var.depend.txt");
+        assert!(var_dst.exists());
+        assert!(sidecar_dst.exists(), "sidecar should have been hardlinked");
+        // And the sidecar at dst is the SAME inode as the source — i.e.
+        // an actual hardlink, not a copy.
+        assert!(
+            same_identity(&sidecar_dst, &sidecar_src).unwrap_or(false),
+            "sidecar at dst should be a hardlink to the managed-side source"
+        );
+    }
+
+    #[test]
+    fn load_skips_sidecar_when_absent() {
+        // No sidecar present → load succeeds, no sidecar created.
+        let (_w, addon, managed, mut conn) = fixture();
+        add_pkg(&managed, &conn, 1, "Alice", "Foo");
+        let res = load(
+            &mut conn,
+            &SeedSpec {
+                creators: vec!["Alice".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(res.added, 1);
+        assert!(addon.join("Alice.Foo.1.var").exists());
+        assert!(!addon.join("Alice.Foo.1.var.depend.txt").exists());
+    }
+
+    #[test]
+    fn unload_removes_sidecar_along_with_var() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_pkg(&managed, &conn, 1, "Alice", "Foo");
+        std::fs::write(
+            managed.join("Alice.Foo.1.var.depend.txt"),
+            b"Bob.Dep.3\n",
+        )
+        .unwrap();
+        load(
+            &mut conn,
+            &SeedSpec {
+                creators: vec!["Alice".into()],
+                package_ids: vec![],
+            },
+        )
+        .unwrap();
+        assert!(addon.join("Alice.Foo.1.var.depend.txt").exists());
+
+        let res = unload_all(&mut conn).unwrap();
+        assert_eq!(res.removed, 1);
+        assert!(!addon.join("Alice.Foo.1.var").exists());
+        assert!(
+            !addon.join("Alice.Foo.1.var.depend.txt").exists(),
+            "sidecar should have been removed alongside the .var"
+        );
+        // managed-side sidecar untouched.
+        assert!(managed.join("Alice.Foo.1.var.depend.txt").exists());
     }
 }

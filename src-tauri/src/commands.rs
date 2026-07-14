@@ -559,6 +559,83 @@ pub async fn unload_all(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Additive load: hardlink in `closure(seeds)` minus what's already in
+/// the active folder. Won't remove anything. Drives the right-click
+/// "Load" action and the additive variant of seed-by-author.
+#[tauri::command]
+pub async fn load_visibility_additive(
+    state: State<'_, AppState>,
+    seeds: crate::visibility::SeedSpec,
+) -> Result<crate::materialize::LoadResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db.lock();
+        crate::materialize::load_additive(&mut conn, &seeds)
+            .map_err(|e| format!("load_additive failed: {e:#}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Targeted unload: removes hardlinks for the given package ids. Ids
+/// not currently in the active folder are silently no-ops.
+#[tauri::command]
+pub async fn unload_packages(
+    state: State<'_, AppState>,
+    package_ids: Vec<i64>,
+) -> Result<crate::materialize::LoadResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db.lock();
+        crate::materialize::unload_packages(&mut conn, &package_ids)
+            .map_err(|e| format!("unload_packages failed: {e:#}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// All package ids currently materialized in the active folder. Cheap
+/// query — drives the UI's per-card Load/Unload state. Refreshed after
+/// every load/unload action and on app mount.
+#[tauri::command]
+pub fn list_active_package_ids(
+    state: State<'_, AppState>,
+) -> Result<Vec<i64>, String> {
+    let conn = state.db.lock();
+    let mut stmt = conn
+        .prepare("SELECT package_id FROM active_folder_state ORDER BY package_id")
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+/// Detect `.var` files dropped into addon_root that the package manager
+/// doesn't own — typically Hub-downloaded packages VaM placed there
+/// after the visibility-presets setup. Post-setup, the scanner only
+/// walks managed_root, so these files are otherwise invisible and will
+/// block hardlinks at conflicting paths on the next preset load.
+///
+/// Pure read-only walk; never mutates the library. Drives the warning
+/// banner in the Visibility modal. The grace window (default 10s) skips
+/// files VaM may still be writing.
+#[tauri::command]
+pub async fn list_unmanaged_addon_files(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::materialize::UnmanagedFile>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock();
+        crate::materialize::list_unmanaged_addon_files(&conn, 10)
+            .map_err(|e| format!("scan unmanaged failed: {e:#}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// Read-only health check: walks active_folder_state and reports which
 /// rows are still valid hardlinks vs. stale (missing in active /
 /// managed, or inode mismatch). Caller decides whether to fix.

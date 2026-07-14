@@ -550,6 +550,20 @@ pub fn begin_migration(
                         continue;
                     }
                 }
+                // Carry the .var.depend.txt sidecar along if present. Best-
+                // effort: VaM regenerates it on next package load, so a
+                // missing sidecar isn't a migration error. Idempotent like
+                // the .var move (skip if dest already has one).
+                let sidecar_old = fsutil::sidecar_path(&old_path);
+                let sidecar_new = fsutil::sidecar_path(&new_path);
+                if sidecar_old.exists() && !sidecar_new.exists() {
+                    if let Err(e) = std::fs::rename(&sidecar_old, &sidecar_new) {
+                        eprintln!(
+                            "setup: sidecar move failed for {}: {e}",
+                            sidecar_old.display()
+                        );
+                    }
+                }
                 // At this point new_path holds the file (either just renamed
                 // or already there from a previous run). Update DB.
                 upd.execute(params![new_path_str, id])?;
@@ -736,6 +750,19 @@ pub fn revert_setup(
                             reason: format!("rename: {e}"),
                         });
                         continue;
+                    }
+
+                    // Move the .var.depend.txt sidecar back too. Best-
+                    // effort — symmetric with forward migration.
+                    let sidecar_src = fsutil::sidecar_path(managed_entry);
+                    let sidecar_dst = fsutil::sidecar_path(&dest);
+                    if sidecar_src.exists() && !sidecar_dst.exists() {
+                        if let Err(e) = std::fs::rename(&sidecar_src, &sidecar_dst) {
+                            eprintln!(
+                                "setup: sidecar revert failed for {}: {e}",
+                                sidecar_src.display()
+                            );
+                        }
                     }
 
                     // Update packages.var_path: rows pointing at this
@@ -1197,6 +1224,33 @@ mod tests {
     }
 
     #[test]
+    fn migration_carries_sidecar_along() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_var(&addon, &conn, "Author.Foo.1.var");
+        std::fs::write(
+            addon.join("Author.Foo.1.var.depend.txt"),
+            b"Bob.Dep.3   By: Bob\n",
+        )
+        .unwrap();
+
+        let res = begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 1);
+        assert_eq!(res.errors.len(), 0);
+
+        // .var moved + sidecar followed.
+        assert!(!addon.join("Author.Foo.1.var").exists());
+        assert!(managed.join("Author.Foo.1.var").exists());
+        assert!(
+            !addon.join("Author.Foo.1.var.depend.txt").exists(),
+            "sidecar should have moved out of addon_root"
+        );
+        assert!(
+            managed.join("Author.Foo.1.var.depend.txt").exists(),
+            "sidecar should now be next to the .var in managed_root"
+        );
+    }
+
+    #[test]
     fn migration_handles_leftover_var_not_in_db() {
         let (_w, addon, managed, mut conn) = fixture();
         add_var(&addon, &conn, "Author.Foo.1.var");
@@ -1427,6 +1481,33 @@ mod tests {
                 addon.display()
             );
         }
+    }
+
+    #[test]
+    fn revert_carries_sidecar_along() {
+        let (_w, addon, managed, mut conn) = fixture();
+        add_var(&addon, &conn, "Author.Foo.1.var");
+        std::fs::write(
+            addon.join("Author.Foo.1.var.depend.txt"),
+            b"Bob.Dep.3\n",
+        )
+        .unwrap();
+
+        // Forward migration moves both into managed.
+        begin_migration(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert!(managed.join("Author.Foo.1.var.depend.txt").exists());
+
+        // Revert should bring both back to addon.
+        let res = revert_setup(&mut conn, &addon, &managed, |_| {}).unwrap();
+        assert_eq!(res.moved, 1);
+        assert_eq!(res.errors.len(), 0);
+
+        assert!(addon.join("Author.Foo.1.var").exists());
+        assert!(
+            addon.join("Author.Foo.1.var.depend.txt").exists(),
+            "sidecar should be back in addon_root after revert"
+        );
+        assert!(!managed.join("Author.Foo.1.var.depend.txt").exists());
     }
 
     #[test]

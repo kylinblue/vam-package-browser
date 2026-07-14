@@ -8,12 +8,15 @@ import {
   listCreatorsForPackages,
   listFavoritePackageIds,
   listPresets,
+  listUnmanagedAddonFiles,
   loadVisibility,
+  loadVisibilityAdditive,
   unloadAll,
   type LoadPlan,
   type LoadResult,
   type PresetSummary,
   type SeedSpec,
+  type UnmanagedFile,
 } from "../lib/api";
 import type { ToastMessage } from "./Toast";
 
@@ -67,6 +70,21 @@ export function LoadVisibilityModal({
   // SeedSpec stays as explicit package_ids (current default).
   const [authorMode, setAuthorMode] = useState(false);
   const [selectionAuthors, setSelectionAuthors] = useState<string[]>([]);
+
+  // VaM-downloaded packages sitting in addon_root that we don't own.
+  // Fired on mount: if non-empty we surface a warning banner so the
+  // user can decide whether to integrate them into the managed library.
+  const [unmanaged, setUnmanaged] = useState<UnmanagedFile[]>([]);
+  useEffect(() => {
+    if (!setupComplete) return;
+    listUnmanagedAddonFiles()
+      .then(setUnmanaged)
+      .catch((e) => {
+        // Non-fatal — the banner just stays hidden. Surface in console
+        // so a misconfigured addon_root still gets caught in dev.
+        console.error("listUnmanagedAddonFiles:", e);
+      });
+  }, [setupComplete]);
 
   // Effective seeds for the plan + commit. Falls back to the empty
   // SeedSpec (= unload-all) when nothing is selected and no preset is
@@ -147,6 +165,14 @@ export function LoadVisibilityModal({
     }
   }, [activeSeeds]);
 
+  // Seed-by-author is additive on purpose: the user's mental model for
+  // "include this author" is "add them to what I have", not "reconcile
+  // the active folder to exactly this author's closure". Author toggle on
+  // → additive commit, even though the dry-run plan was computed against
+  // the destructive reconcile (ReadyView clamps `will_remove` to 0 in
+  // the additive case so the preview matches the actual commit).
+  const isAdditive = authorMode && selectionAuthors.length > 0;
+
   const commit = useCallback(async () => {
     setPhase({ kind: "committing" });
     try {
@@ -155,7 +181,9 @@ export function LoadVisibilityModal({
       const result: LoadResult =
         activeSeeds === null
           ? await unloadAll()
-          : await loadVisibility(seeds);
+          : isAdditive
+            ? await loadVisibilityAdditive(seeds)
+            : await loadVisibility(seeds);
       const msg = formatResult(result);
       onActionResult({ kind: "ok", text: msg });
       onClose();
@@ -164,7 +192,7 @@ export function LoadVisibilityModal({
       setPhase({ kind: "error", message: `${e}` });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seeds, activeSeeds, onActionResult, onClose]);
+  }, [seeds, activeSeeds, isAdditive, onActionResult, onClose]);
 
   const loadPresetSeeds = useCallback(
     async (id: number) => {
@@ -287,6 +315,8 @@ export function LoadVisibilityModal({
       <div style={cardStyle}>
         <h2 style={headingStyle}>Visibility — load / unload</h2>
 
+        {unmanaged.length > 0 && <UnmanagedBanner files={unmanaged} />}
+
         <div style={quickActionsStyle}>
           <button
             type="button"
@@ -363,6 +393,7 @@ export function LoadVisibilityModal({
             <ReadyView
               plan={phase.plan}
               isUnloadAll={isUnloadAll}
+              isAdditive={isAdditive}
               onCancel={onClose}
               onCommit={commit}
             />
@@ -395,15 +426,66 @@ export function LoadVisibilityModal({
 
 // --- subviews ---------------------------------------------------------------
 
+interface UnmanagedBannerProps {
+  files: UnmanagedFile[];
+}
+
+/// Surfaces .var files VaM dropped into addon_root after the
+/// visibility-presets setup. These bypass our ledger entirely — they
+/// won't appear in the grid (the scanner walks managed_root post-setup)
+/// and can block hardlinks at conflicting paths on the next preset load.
+/// Reconcile-into-managed action is a follow-up; for now we warn and
+/// show what was found.
+function UnmanagedBanner({ files }: UnmanagedBannerProps) {
+  const totalMb =
+    files.reduce((sum, f) => sum + f.size_bytes, 0) / (1024 * 1024);
+  const preview = files.slice(0, 4);
+  const more = files.length > preview.length;
+  return (
+    <div style={unmanagedBannerStyle}>
+      <div>
+        <strong>
+          ⚠ {files.length} unmanaged .var
+          {files.length === 1 ? "" : "s"} in AddonPackages
+        </strong>{" "}
+        ({totalMb < 0.1 ? "<0.1" : totalMb.toFixed(1)} MB total) —
+        likely Hub downloads VaM placed there directly. These won't show
+        in the grid and may block hardlinks on the next Load.
+      </div>
+      <ul style={unmanagedListStyle}>
+        {preview.map((f) => (
+          <li key={f.path}>
+            <code>{f.path.split(/[\\/]/).pop()}</code>
+          </li>
+        ))}
+        {more && <li>… and {files.length - preview.length} more</li>}
+      </ul>
+      <div style={{ fontSize: 11, color: "var(--fg-dim)", marginTop: 4 }}>
+        Reconcile-into-managed action coming next milestone. Until then,
+        manually move them into your managed library folder and rescan
+        to surface them in the grid.
+      </div>
+    </div>
+  );
+}
+
 interface ReadyProps {
   plan: LoadPlan;
   isUnloadAll: boolean;
+  /** True when the parent will commit via `loadVisibilityAdditive`
+   *  instead of `loadVisibility`. Clamps the displayed `will_remove` to
+   *  zero and adjusts the commit-button label so the preview tells the
+   *  truth about what's actually about to happen. */
+  isAdditive: boolean;
   onCancel: () => void;
   onCommit: () => void;
 }
 
-function ReadyView({ plan, isUnloadAll, onCancel, onCommit }: ReadyProps) {
-  const { preview, currently_loaded, will_add, will_remove, will_keep } = plan;
+function ReadyView({ plan, isUnloadAll, isAdditive, onCancel, onCommit }: ReadyProps) {
+  const { preview, currently_loaded, will_add, will_keep } = plan;
+  // Additive commit never removes — the dry-run plan was computed
+  // against a destructive reconcile, so override here for display.
+  const will_remove = isAdditive ? 0 : plan.will_remove;
   const targetTotal = preview.total;
   const remainsRemove = currently_loaded > 0 && will_remove > 0;
 
@@ -518,7 +600,7 @@ function ReadyView({ plan, isUnloadAll, onCancel, onCommit }: ReadyProps) {
               : ""
           }
         >
-          {isUnloadAll ? "Unload all" : "Load"}
+          {isUnloadAll ? "Unload all" : isAdditive ? "Add to active" : "Load"}
         </button>
       </div>
     </>
@@ -544,8 +626,9 @@ function AuthorToggle({ on, authors, onToggle }: AuthorToggleProps) {
       <span>
         <strong>Seed by author</strong> ({authors.length} author
         {authors.length === 1 ? "" : "s"}: {preview}
-        {more}) — future new packages by these creators auto-join on
-        next load. Off = use the exact package list you selected.
+        {more}) — <em>additive</em>: adds these authors' packages to
+        what's already loaded without removing anything. Off = exact
+        package list, reconciled (may unload other packages).
       </span>
     </label>
   );
@@ -782,6 +865,22 @@ const hintNoteStyle: React.CSSProperties = {
   margin: "8px 0",
   fontSize: 12,
   lineHeight: 1.4,
+};
+
+const unmanagedBannerStyle: React.CSSProperties = {
+  background: "rgba(210, 153, 34, 0.10)",
+  border: "1px solid rgba(210, 153, 34, 0.35)",
+  borderRadius: 4,
+  padding: "10px 12px",
+  margin: "0 0 12px",
+  fontSize: 12,
+  lineHeight: 1.4,
+};
+
+const unmanagedListStyle: React.CSSProperties = {
+  margin: "6px 0 0",
+  paddingLeft: 18,
+  fontSize: 11,
 };
 
 const authorToggleStyle: React.CSSProperties = {

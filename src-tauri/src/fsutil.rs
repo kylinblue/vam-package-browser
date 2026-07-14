@@ -9,9 +9,24 @@
 //! Non-Windows builds get stubs that return errors — the app only ships
 //! on Windows, but `cargo check` on dev hardware shouldn't break.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+
+/// VaM writes a `.depend.txt` sidecar next to every `.var` it loads,
+/// listing the transitive dep closure it actually resolved. The sidecar
+/// is the authoritative dep set for that package (often a superset of
+/// what's in the .var's meta.json, since meta is author-declared and
+/// the sidecar reflects runtime resolution).
+///
+/// Convention is to append, not replace extensions: `Foo.Bar.1.var` →
+/// `Foo.Bar.1.var.depend.txt`. Works the same for directory packages
+/// (`Foo.Bar.1.var/` → `Foo.Bar.1.var.depend.txt` as a sibling file).
+pub fn sidecar_path(var_path: &Path) -> PathBuf {
+    let mut s = var_path.as_os_str().to_owned();
+    s.push(".depend.txt");
+    PathBuf::from(s)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeInfo {
