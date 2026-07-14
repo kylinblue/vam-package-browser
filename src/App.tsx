@@ -952,9 +952,23 @@ export default function App() {
               setUnidentifiedSelected((cur) => !cur);
               setSelectedHubCategory(null);
             }}
+            typeFilter={selectedType}
+            onClearTypeFilter={() => setSelectedType(null)}
           />
         ) : (
           <TypeChips counts={typeCounts} selected={selectedType} onSelect={setSelectedType} />
+        )}
+
+        {/* Cold-start hint: Advanced mode is a wall of dimmed "ghost"
+            tiles until the first hub sync populates hub_category. The
+            chip aggregate being empty is the tell — point at the sync
+            controls instead of letting the mode look broken. */}
+        {viewMode === "advanced" && hubCategoryCounts.length === 0 && (
+          <div className="hub-empty-hint">
+            No hub metadata yet — expand <strong>Hub sync</strong> below and
+            run a sync to categorize your library. Until then every tile
+            renders dimmed (no hub match).
+          </div>
         )}
 
         <div className="toolbar-row">
@@ -968,7 +982,7 @@ export default function App() {
           <label
             className="toolbar-toggle"
             style={{ marginLeft: "auto" }}
-            title="Show only packages with no hub linkage at all — no auto-match, no manual pin, no category override. These are the rows that render dimmed (ghost) in Fetched mode."
+            title="Show only packages with no hub linkage at all — no auto-match, no manual pin, no category override. These are the rows that render dimmed (ghost) in Advanced mode."
           >
             <input
               type="checkbox"

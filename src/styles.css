@@ -266,6 +266,16 @@ html, body, #root {
   gap: 6px;
   padding: 2px 0;
 }
+/* Advanced-mode cold-start banner: shown while the hub-category chip
+   aggregate is empty (library never hub-synced). Muted, single line. */
+.hub-empty-hint {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+}
 .type-chip {
   display: inline-flex;
   align-items: center;

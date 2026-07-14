@@ -34,6 +34,12 @@ interface Props {
   unidentifiedCount?: number;
   onSelectUnidentified?: () => void;
   isUnidentifiedSelected?: boolean;
+  /** Heuristic package_type filter active while in Advanced mode (set via
+   *  the grid context menu or DetailView's "filter by type"). Advanced has
+   *  no TypeChips row, so without this pill the filter would silently
+   *  narrow the grid with nothing visible to clear. Click removes it. */
+  typeFilter?: string | null;
+  onClearTypeFilter?: () => void;
 }
 
 export function HubCategoryChips({
@@ -43,6 +49,8 @@ export function HubCategoryChips({
   unidentifiedCount,
   onSelectUnidentified,
   isUnidentifiedSelected,
+  typeFilter,
+  onClearTypeFilter,
 }: Props) {
   const total = counts.reduce((sum, c) => sum + c.count, 0);
   // If `selected` points at a category the `counts` snapshot doesn't know
@@ -105,6 +113,17 @@ export function HubCategoryChips({
         >
           <span>(unidentified)</span>
           <span className="type-chip-n">{unidentifiedCount.toLocaleString()}</span>
+        </button>
+      )}
+      {typeFilter && onClearTypeFilter && (
+        <button
+          type="button"
+          className="type-chip active"
+          onClick={onClearTypeFilter}
+          title={`Heuristic type filter "${typeFilter}" is narrowing the grid (set via context menu or detail view) — click to clear`}
+        >
+          <span>Type: {typeFilter}</span>
+          <span className="type-chip-n">✕</span>
         </button>
       )}
     </div>
