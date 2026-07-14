@@ -31,7 +31,8 @@ folder — see [Where your data lives](#where-your-data-lives).
 - Build tools (you build the app yourself — see below):
   [Node.js](https://nodejs.org) 20+, [Rust](https://rustup.rs) (stable,
   MSVC toolchain), and Visual Studio Build Tools with the
-  **"Desktop development with C++"** workload.
+  **"Desktop development with C++"** workload. **`setup.bat` installs any
+  of these that are missing** — you don't need to fetch them yourself.
 
 ### A note on performance
 
@@ -48,17 +49,17 @@ proportion to library size (small WebP files, but they add up).
 ## Getting started
 
 There are no prepackaged downloads — you build and run the app from source.
-It's two commands after the prerequisites are installed:
 
-```powershell
-git clone <this repo>
-cd vam-package-browser
-npm install
-```
-
-Then **double-click `run-dev.bat`** (or run it from a terminal). It locates
-your MSVC/cargo toolchain and launches the app in dev mode. The first build
-compiles the Rust backend and takes several minutes; later launches are fast.
+1. Get the source: `git clone` this repo, or download and unzip a source
+   archive from the Releases page.
+2. **Double-click `setup.bat`.** It checks for Node.js, the C++ Build Tools,
+   and Rust, installs whatever is missing via `winget`, and runs
+   `npm install`. If everything is already present it finishes in seconds;
+   if the VS Build Tools need installing, expect a multi-GB download.
+3. **Double-click `run-dev.bat`** (from a new terminal/Explorer window if
+   setup just installed something). It locates your toolchain and launches
+   the app. The first build compiles the Rust backend and takes several
+   minutes; later launches are fast.
 
 If you'd rather have a standalone optimized exe instead of running through
 `run-dev.bat` each time:
